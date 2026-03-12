@@ -1,0 +1,26 @@
+从2026年3月12日开始
+
+2026年3月12日 - add monika sayori natsuki(未作审查)
+"""
+
+ G:\EmoScan Pro\MoeFace\data 的目录
+
+2026/03/12  20:59    <DIR>          .
+2026/03/12  20:59    <DIR>          ..
+2026/03/09  20:26    <DIR>          Ayachi_Nene
+2026/03/12  20:58    <DIR>          Monika
+2026/03/12  20:42    <DIR>          Natsuki
+2026/03/09  20:26    <DIR>          Neuro-sama
+2026/03/08  19:28    <DIR>          otto
+2026/03/12  20:44    <DIR>          Sayori
+2026/03/09  20:26    <DIR>          ShikiNatsume
+2026/03/09  20:26    <DIR>          丛雨
+2026/03/08  19:28    <DIR>          东雪莲
+2026/03/08  19:28    <DIR>          棍母
+2026/03/09  20:26    <DIR>          永雏塔菲
+               0 个文件              0 字节
+              13 个目录 200,668,356,608 可用字节
+
+G:\EmoScan Pro\MoeFace\data>
+'''
+
