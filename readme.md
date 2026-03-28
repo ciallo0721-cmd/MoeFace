@@ -29,9 +29,7 @@ MoeFace/
 - 💾 **特征库缓存**：特征库自动保存为JSON，避免重复计算
 
 ## 示例
-<video width="800" controls>
-  <source src="./视频示例/taffy.mp4" type="video/mp4">
-</video>
+[taffy.mp4](https://github.com/ciallo0721-cmd/MoeFace/releases/download/moeface/taffy.mp4)
 
 ## 环境要求
 - Python 3.7+
