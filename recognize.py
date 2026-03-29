@@ -26,23 +26,164 @@ FONT_PATH = "./simhei.ttf"
 
 # ============ 关键词配置 ============
 KEYWORD_MAPPING = [
+    # ---------- 永雏塔菲 ----------
     {"keyword": "塔菲", "db_name": "永雏塔菲"},
     {"keyword": "雏草姬", "db_name": "永雏塔菲"},
+    {"keyword": "Taffy", "db_name": "永雏塔菲"},
+
+    # ---------- 东雪莲 ----------
     {"keyword": "东雪莲", "db_name": "东雪莲"},
     {"keyword": "罕见", "db_name": "东雪莲"},
+    {"keyword": "Azuma Lim", "db_name": "东雪莲"},
+    {"keyword": "AzumaLim", "db_name": "东雪莲"},
+
+    # ---------- 丛雨 ----------
     {"keyword": "丛雨", "db_name": "丛雨"},
+    {"keyword": "Murasame", "db_name": "丛雨"},
+
+    # ---------- 棍母 ----------
     {"keyword": "棍母", "db_name": "棍母"},
+    {"keyword": "Konbu", "db_name": "棍母"},
+    {"keyword": "棍棍", "db_name": "棍母"},
+
+    # ---------- Ayachi_Nene ----------
     {"keyword": "Ayachi", "db_name": "Ayachi_Nene"},
     {"keyword": "Nene", "db_name": "Ayachi_Nene"},
     {"keyword": "绫地宁宁", "db_name": "Ayachi_Nene"},
     {"keyword": "宁宁", "db_name": "Ayachi_Nene"},
+    {"keyword": "绫地", "db_name": "Ayachi_Nene"},
+
+    # ---------- Neuro-sama ----------
     {"keyword": "Neuro", "db_name": "Neuro-sama"},
     {"keyword": "牛肉", "db_name": "Neuro-sama"},
+    {"keyword": "Neurosama", "db_name": "Neuro-sama"},
+
+    # ---------- otto ----------
     {"keyword": "Otto", "db_name": "otto"},
+    {"keyword": "otto", "db_name": "otto"},
+
+    # ---------- ShikiNatsume ----------
     {"keyword": "夏目", "db_name": "ShikiNatsume"},
     {"keyword": "四季夏目", "db_name": "ShikiNatsume"},
     {"keyword": "枣子姐", "db_name": "ShikiNatsume"},
     {"keyword": "Shiki", "db_name": "ShikiNatsume"},
+    {"keyword": "ShikiNatsume", "db_name": "ShikiNatsume"},
+
+    # ---------- Monika (DDLC 心跳文学部) ----------
+    {"keyword": "Monika", "db_name": "Monika"},
+    {"keyword": "莫妮卡", "db_name": "Monika"},
+    {"keyword": "Just Monika", "db_name": "Monika"},
+
+    # ---------- Natsuki (DDLC 心跳文学部) ----------
+    {"keyword": "Natsuki", "db_name": "Natsuki"},
+    {"keyword": "夏树", "db_name": "Natsuki"},
+
+    # ---------- Sayori (DDLC 心跳文学部) ----------
+    {"keyword": "Sayori", "db_name": "Sayori"},
+    {"keyword": "纱世里", "db_name": "Sayori"},
+    {"keyword": "小夜", "db_name": "Sayori"},
+
+    # ---------- 三司绫濑 (RIDDLE JOKER) ----------
+    {"keyword": "三司绫濑", "db_name": "三司绫濑"},
+    {"keyword": "三司", "db_name": "三司绫濑"},
+    {"keyword": "锉刀", "db_name": "三司绫濑"},
+    {"keyword": "Ayase", "db_name": "三司绫濑"},
+    {"keyword": "Misumi", "db_name": "三司绫濑"},
+
+    # ---------- 初音未来 ----------
+    {"keyword": "初音未来", "db_name": "初音未来"},
+    {"keyword": "初音", "db_name": "初音未来"},
+    {"keyword": "Miku", "db_name": "初音未来"},
+    {"keyword": "Hatsune", "db_name": "初音未来"},
+    {"keyword": "葱娘", "db_name": "初音未来"},
+    {"keyword": "米库", "db_name": "初音未来"},
+
+    # ---------- 千早爱音 (MyGO!!!!!) ----------
+    {"keyword": "千早爱音", "db_name": "千早爱音"},
+    {"keyword": "爱音", "db_name": "千早爱音"},
+    {"keyword": "Anon", "db_name": "千早爱音"},
+    {"keyword": "Chihaya", "db_name": "千早爱音"},
+
+    # ---------- 喜多郁代 (孤独摇滚) ----------
+    {"keyword": "喜多郁代", "db_name": "喜多郁代"},
+    {"keyword": "喜多", "db_name": "喜多郁代"},
+    {"keyword": "Ikuyo", "db_name": "喜多郁代"},
+    {"keyword": "Kita", "db_name": "喜多郁代"},
+    {"keyword": "归去来兮", "db_name": "喜多郁代"},
+
+    # ---------- 安和昴 (Girls Band Cry) ----------
+    {"keyword": "安和昴", "db_name": "安和昴"},
+    {"keyword": "昴", "db_name": "安和昴"},
+    {"keyword": "Subaru", "db_name": "安和昴"},
+    {"keyword": "Yasunaga", "db_name": "安和昴"},
+
+    # ---------- 常陆茉子 (千恋*万花) ----------
+    {"keyword": "常陆茉子", "db_name": "常陆茉子"},
+    {"keyword": "茉子", "db_name": "常陆茉子"},
+    {"keyword": "Mako", "db_name": "常陆茉子"},
+    {"keyword": "Hitachi", "db_name": "常陆茉子"},
+
+    # ---------- 明月栞那 (星光咖啡馆与死神之蝶) ----------
+    {"keyword": "明月栞那", "db_name": "明月栞那"},
+    {"keyword": "栞那", "db_name": "明月栞那"},
+    {"keyword": "Kanna", "db_name": "明月栞那"},
+    {"keyword": "Akizuki", "db_name": "明月栞那"},
+
+    # ---------- 朝武芳乃 (千恋*万花) ----------
+    {"keyword": "朝武芳乃", "db_name": "朝武芳乃"},
+    {"keyword": "芳乃", "db_name": "朝武芳乃"},
+    {"keyword": "Yoshino", "db_name": "朝武芳乃"},
+    {"keyword": "Tomotake", "db_name": "朝武芳乃"},
+    {"keyword": "Ciallo", "db_name": "朝武芳乃"},
+
+    # ---------- 河原木桃香 (Girls Band Cry) ----------
+    {"keyword": "河原木桃香", "db_name": "河原木桃香"},
+    {"keyword": "桃香", "db_name": "河原木桃香"},
+    {"keyword": "Momoka", "db_name": "河原木桃香"},
+    {"keyword": "Kawaraoki", "db_name": "河原木桃香"},
+
+    # ---------- 海老冢智 (Girls Band Cry) ----------
+    {"keyword": "海老冢智", "db_name": "海老冢智"},
+    {"keyword": "海老塚智", "db_name": "海老冢智"},
+    {"keyword": "Tomo", "db_name": "海老冢智"},
+    {"keyword": "Ebizuka", "db_name": "海老冢智"},
+
+    # ---------- 神乐Mea ----------
+    {"keyword": "神乐Mea", "db_name": "神乐Mea"},
+    {"keyword": "神楽めあ", "db_name": "神乐Mea"},
+    {"keyword": "Kagura Mea", "db_name": "神乐Mea"},
+    {"keyword": "Mea", "db_name": "神乐Mea"},
+    {"keyword": "咩啊", "db_name": "神乐Mea"},
+    {"keyword": "屑女仆", "db_name": "神乐Mea"},
+
+    # ---------- 绪山真寻 (别当欧尼酱了！) ----------
+    {"keyword": "绪山真寻", "db_name": "绪山真寻"},
+    {"keyword": "真寻", "db_name": "绪山真寻"},
+    {"keyword": "Mahiro", "db_name": "绪山真寻"},
+    {"keyword": "Ogasawara", "db_name": "绪山真寻"},
+    {"keyword": "欧尼酱", "db_name": "绪山真寻"},
+
+    # ---------- 蕾娜·列支敦瑙尔 (千恋*万花) ----------
+    {"keyword": "蕾娜", "db_name": "蕾娜·列支敦瑙尔"},
+    {"keyword": "列支敦瑙尔", "db_name": "蕾娜·列支敦瑙尔"},
+    {"keyword": "Rena", "db_name": "蕾娜·列支敦瑙尔"},
+    {"keyword": "Lichtennauer", "db_name": "蕾娜·列支敦瑙尔"},
+    {"keyword": "Richtenauer", "db_name": "蕾娜·列支敦瑙尔"},
+    {"keyword": "リヒテナウアー", "db_name": "蕾娜·列支敦瑙尔"},
+
+    # ---------- 高松灯 (MyGO!!!!!) ----------
+    {"keyword": "高松灯", "db_name": "高松灯"},
+    {"keyword": "灯", "db_name": "高松灯"},
+    {"keyword": "Tomori", "db_name": "高松灯"},
+    {"keyword": "Takamatsu", "db_name": "高松灯"},
+    {"keyword": "Tomorin", "db_name": "高松灯"},
+
+    # ---------- 井芹仁菜 (Girls Band Cry) ----------
+    {"keyword": "井芹仁菜", "db_name": "井芹仁菜"},
+    {"keyword": "仁菜", "db_name": "井芹仁菜"},
+    {"keyword": "Nina", "db_name": "井芹仁菜"},
+    {"keyword": "Iseri", "db_name": "井芹仁菜"},
+    {"keyword": "仁菜菜", "db_name": "井芹仁菜"},
 ]
 DEFAULT_DB_NAME = "全部特征库"
 # ===================================

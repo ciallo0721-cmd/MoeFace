@@ -1,0 +1,50 @@
+# MEMORY.md — MoeFace 项目长期记忆
+
+## 项目概况
+
+- **项目名**: MoeFace（EmoScan Pro / MoeFace）
+- **路径**: `G:/EmoScan Pro/MoeFace`
+- **功能**: 动漫人脸识别系统，使用 FaceNet + lbpcascade_animeface，通过 JSON 特征库匹配角色
+
+## 核心文件
+
+- `recognize.py` — 主程序，包含关键词配置 `KEYWORD_MAPPING`、特征库构建/加载、视频/摄像头识别
+- `data/` — 各角色训练图片（每个角色一个子文件夹）
+- `features/` — JSON 格式特征库缓存
+
+## KEYWORD_MAPPING 规则
+
+- 用于根据视频文件名中的关键词，自动选择加载哪个角色特征库
+- 匹配逻辑：文件名（小写）包含 keyword（小写）即匹配，返回 `db_name`
+- `DEFAULT_DB_NAME = "全部特征库"` 表示加载所有角色
+
+## 已配置角色及别名（截至 2026-03-29）
+
+| db_name | 关键词示例 | 来源 |
+|---|---|---|
+| 永雏塔菲 | 塔菲、雏草姬、Taffy | VTuber |
+| 东雪莲 | 东雪莲、罕见、Azuma Lim | VTuber |
+| 丛雨 | 丛雨、Murasame | 千恋*万花 |
+| 棍母 | 棍母、Konbu、棍棍 | VTuber |
+| Ayachi_Nene | Ayachi、Nene、绫地宁宁、宁宁、绫地 | VTuber |
+| Neuro-sama | Neuro、牛肉、Neurosama | VTuber |
+| otto | Otto | VTuber |
+| ShikiNatsume | 夏目、四季夏目、枣子姐、Shiki | VTuber |
+| Monika | Monika、莫妮卡、Just Monika | DDLC |
+| Natsuki | Natsuki、夏树 | DDLC |
+| Sayori | Sayori、纱世里、小夜 | DDLC |
+| 三司绫濑 | 三司绫濑、三司、锉刀、Ayase、Misumi | RIDDLE JOKER |
+| 初音未来 | 初音未来、初音、Miku、Hatsune、葱娘、米库 | VOCALOID |
+| 千早爱音 | 千早爱音、爱音、Anon、Chihaya | MyGO!!!!! |
+| 喜多郁代 | 喜多郁代、喜多、Ikuyo、Kita、归去来兮 | 孤独摇滚 |
+| 安和昴 | 安和昴、昴、Subaru、Yasunaga | Girls Band Cry |
+| 常陆茉子 | 常陆茉子、茉子、Mako、Hitachi | 千恋*万花 |
+| 明月栞那 | 明月栞那、栞那、Kanna、Akizuki | 星光咖啡馆与死神之蝶 |
+| 朝武芳乃 | 朝武芳乃、芳乃、Yoshino、Tomotake、Ciallo | 千恋*万花 |
+| 河原木桃香 | 河原木桃香、桃香、Momoka、Kawaraoki | Girls Band Cry |
+| 海老冢智 | 海老冢智、海老塚智、Tomo、Ebizuka | Girls Band Cry |
+| 神乐Mea | 神乐Mea、Mea、咩啊、屑女仆 | VTuber |
+| 绪山真寻 | 绪山真寻、真寻、Mahiro、欧尼酱 | 别当欧尼酱了！ |
+| 蕾娜·列支敦瑙尔 | 蕾娜、列支敦瑙尔、Rena、Lichtennauer | 千恋*万花 |
+| 高松灯 | 高松灯、灯、Tomori、Tomorin | MyGO!!!!! |
+| 井芹仁菜 | 井芹仁菜、仁菜、Nina、Iseri | Girls Band Cry |
