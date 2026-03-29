@@ -8,6 +8,7 @@ MoeFace/
 ├── data/               # 角色图片库（每个角色一个文件夹）
 ├── features/           # 特征库JSON文件（自动生成）
 ├── temp/               # 临时文件目录
+├── demo/              #示例图片
 ├── 视频示例/           # 示例视频文件
 │   └── taffy.mp4       # 示例视频
 ├── lbpcascade_animeface.xml  # 动漫人脸检测分类器
@@ -152,6 +153,17 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
    - 爬取频率已做限制，避免被封禁
    - 部分网站可能有反爬机制，导致爬取失败
    - 建议爬取后手动检查图片质量
+
+5. **Bug**
+   - 动漫人脸检测分类器（lbpcascade_animeface.xml）存在误识别情况，可能将角色的衣物、装饰等非人脸区域错误识别为人脸
+   - 该问题在识别 “永雏塔菲” 角色时表现尤为明显，具体可参考以下示例截图：
+   ![image](demo/1.png)
+   ![image](demo/2.png)
+   ![image](demo/3.png)
+   ![image](demo/4.png)
+   ![image](demo/5.png)
+   ![image](demo/6.png)
+   ![image](demo/7.png)
 
 ## 自定义配置
 
