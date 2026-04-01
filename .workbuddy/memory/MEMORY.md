@@ -18,6 +18,16 @@
 - 匹配逻辑：文件名（小写）包含 keyword（小写）即匹配，返回 `db_name`
 - `DEFAULT_DB_NAME = "全部特征库"` 表示加载所有角色
 
+## data/ 目录新增角色文件夹（2026-04-01，更新版）
+
+以下为空文件夹（待采集训练图片），全部为全球热门角色：
+
+**动漫角色**（MyWaifuList 全球热门榜）：Megumin、Rem、Asuna、Zero_Two、Emilia、Kurisu_Makise、Nezuko、Saber、初音未来（已有）
+
+**Hololive VTuber**（订阅数百万级）：Gawr_Gura、Houshou_Marine、Hoshimachi_Suisei、Usada_Pekora、Shirakami_Fubuki、Inugami_Korone、Minato_Aqua、Nekomata_Okayu、Shirogane_Noel、Oozora_Subaru、Sakura_Miko、Amane_Kanata、Nakiri_Ayame、Tsunomaki_Watame、Takanashi_Kiara、Mori_Calliope、Watson_Amelia、Aki_Marine
+
+⚠️ 注意：之前错误创建了 Bocchi、Kaguya_Luna、Subaru_Hololive、Yuki_Noa 等冷门/不规范命名的文件夹，已全部删除。数据投毒不可取！
+
 ## 已配置角色及别名（截至 2026-03-29）
 
 | db_name | 关键词示例 | 来源 |
