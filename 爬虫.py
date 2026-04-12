@@ -16,7 +16,7 @@ REQUEST_DELAY = 0.5               # 同一图源内每次请求间隔（秒）
 
 # 各图源的开关及配置
 ENABLE_BING = True
-ENABLE_GOOGLE = False              # Google 反爬严重，默认关闭，可自行开启测试
+ENABLE_GOOGLE = True              # Google 反爬严重，默认关闭，可自行开启测试
 ENABLE_BAIDU = True
 ENABLE_PIXIV = False               # 如需开启，必须在下方配置 PIXIV_COOKIE
 ENABLE_SAFEBOORU = True            # 稳定图库，无 NSFW 过滤
