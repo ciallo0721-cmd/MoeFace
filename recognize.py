@@ -13,14 +13,24 @@ import traceback
 from pathlib import Path
 
 # ── 确保以脚本所在目录为基准路径 ────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
+import sys as _sys
+
+def _resource_base() -> Path:
+    """兼容 PyInstaller 打包：打包后资源在 _MEIPASS，开发时在脚本目录"""
+    if getattr(_sys, "frozen", False) and hasattr(_sys, "_MEIPASS"):
+        return Path(_sys._MEIPASS)
+    return Path(__file__).resolve().parent
+
+BASE_DIR = Path(__file__).resolve().parent  # 数据/特征库写在可执行文件旁边
+RESOURCE_DIR = _resource_base()             # XML/字体等只读资源
+
 os.chdir(BASE_DIR)
 
-CASCADE_PATH = BASE_DIR / "lbpcascade_animeface.xml"
-FONT_PATH    = BASE_DIR / "simhei.ttf"
+CASCADE_PATH = RESOURCE_DIR / "lbpcascade_animeface.xml"
+FONT_PATH    = RESOURCE_DIR / "simhei.ttf"
 FEATURES_DIR = BASE_DIR / "features"
 DATA_DIR     = BASE_DIR / "data"
-CNAME_PATH   = BASE_DIR / "cname" / "name.json"
+CNAME_PATH   = RESOURCE_DIR / "cname" / "name.json"
 DEFAULT_DB_NAME = "全部特征库"
 
 FEATURES_DIR.mkdir(exist_ok=True)
@@ -152,7 +162,7 @@ def extract_features_from_image(image_path: str, log_fn=print):
 
     gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     faces = _anime_cascade.detectMultiScale(
-        gray, scaleFactor=1.02, minNeighbors=1,
+        gray, scaleFactor=1.02, minNeighbors=3,
         minSize=(20, 20), maxSize=(800, 800)
     )
     if len(faces) == 0:
@@ -311,6 +321,7 @@ def _add_audio(src_video, out_video, tmp_video):
 
 
 def process_image_file(source: str, database: dict, threshold=0.45,
+                       min_neighbors=3,
                        log_fn=print, preview_fn=None, done_fn=None):
     """识别单张图片"""
     import cv2
@@ -326,7 +337,7 @@ def process_image_file(source: str, database: dict, threshold=0.45,
 
         gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         faces = _anime_cascade.detectMultiScale(
-            gray, scaleFactor=1.02, minNeighbors=1,
+            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
             minSize=(20, 20), maxSize=(800, 800)
         )
         log_fn(f"检测到 {len(faces)} 张人脸")
@@ -354,7 +365,7 @@ def process_image_file(source: str, database: dict, threshold=0.45,
 
 
 def process_video_file(source: str, database: dict, output_path=None,
-                       threshold=0.45, skip_frames=2,
+                       threshold=0.45, skip_frames=2, min_neighbors=3,
                        log_fn=print, preview_fn=None,
                        stop_event: threading.Event = None, done_fn=None):
     """处理视频文件，支持逐帧预览"""
@@ -398,7 +409,7 @@ def process_video_file(source: str, database: dict, output_path=None,
             if frame_idx % skip_frames == 0:
                 gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 faces = _anime_cascade.detectMultiScale(
-                    gray, scaleFactor=1.02, minNeighbors=1,
+                    gray, scaleFactor=1.02, minNeighbors=min_neighbors,
                     minSize=(20, 20), maxSize=(800, 800)
                 )
                 for (x, y, fw, fh) in faces:
@@ -574,10 +585,33 @@ class MoeFaceApp:
         self._lbl(parent, "视频跳帧（每N帧识别一次）", PANEL, MUTED,
                   font=("微软雅黑", 8)).pack(**pad)
         self._skip_var = tk.IntVar(value=2)
+
+        def _validate_int(val):
+            return val.isdigit() or val == ""
+        vcmd = parent.register(_validate_int)
         tk.Spinbox(parent, from_=1, to=30, textvariable=self._skip_var,
+                   validate="key", validatecommand=(vcmd, "%P"),
                    bg="#374151", fg=TEXT, buttonbackground="#374151",
                    relief="flat", font=("微软雅黑", 9), width=6
                    ).pack(padx=10, pady=2, anchor="w")
+
+        # — 检测灵敏度（minNeighbors，越大越严格/误检越少）—
+        self._lbl(parent, "检测灵敏度（越大误检越少）", PANEL, MUTED,
+                  font=("微软雅黑", 8)).pack(**pad)
+        mn_frame = tk.Frame(parent, bg=PANEL)
+        mn_frame.pack(fill="x", padx=10, pady=2)
+        self._min_neighbors_var = tk.IntVar(value=3)
+        tk.Scale(mn_frame, from_=1, to=10, resolution=1,
+                 orient="horizontal", variable=self._min_neighbors_var,
+                 bg=PANEL, fg=TEXT, highlightthickness=0,
+                 troughcolor="#374151", activebackground=ACCENT
+                 ).pack(fill="x")
+        self._mn_label = self._lbl(mn_frame,
+                                   f"当前: {self._min_neighbors_var.get()}",
+                                   PANEL, MUTED, font=("微软雅黑", 8))
+        self._mn_label.pack(anchor="e")
+        self._min_neighbors_var.trace_add("write", lambda *_: self._mn_label.config(
+            text=f"当前: {self._min_neighbors_var.get()}"))
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
@@ -748,13 +782,16 @@ class MoeFaceApp:
             self._dispatch_file(path)
 
     def _on_drop(self, event):
-        """接收拖拽文件"""
-        # tkinterdnd2 返回的路径可能被花括号包裹（路径含空格时）
+        """接收拖拽文件，兼容含空格路径和多文件"""
+        import re
         raw = event.data.strip()
-        if raw.startswith("{") and raw.endswith("}"):
-            raw = raw[1:-1]
-        # 多文件只取第一个
-        path = raw.split("} {")[0].strip("{} ")
+        # tkinterdnd2 对含空格的路径用花括号包裹，多文件间用空格分隔
+        # 提取第一个路径（花括号内 或 第一个空格前）
+        matches = re.findall(r'\{([^}]+)\}|(\S+)', raw)
+        if matches:
+            path = (matches[0][0] or matches[0][1]).strip()
+        else:
+            path = raw
         self._dispatch_file(path)
 
     def _dispatch_file(self, path: str):
@@ -766,58 +803,60 @@ class MoeFaceApp:
             return
 
         suffix = Path(path).suffix.lower()
-        # 自动根据文件名切换特征库
         suggested = get_db_name_from_filename(Path(path).name)
-        if suggested != self._db_name or not self._database:
-            self._log(f"🔍 自动选择特征库: {suggested}")
-            self._db_var.set(suggested)
-            db = get_or_build_database(suggested, log_fn=self._log)
-            self._database = db
-            self._db_name  = suggested
-
-        if not self._database:
-            self._log("❌ 特征库为空，无法识别。请先建库或检查 ./data 文件夹")
-            return
 
         self._set_busy(True)
         self._stop_evt.clear()
 
-        if suffix in IMAGE_EXTS:
-            self._log(f"\n🖼  图片: {path}")
-            threading.Thread(
-                target=process_image_file,
-                kwargs=dict(
+        def _load_and_run():
+            # 特征库加载在子线程中执行，避免阻塞 GUI 主线程
+            db = self._database
+            db_name = self._db_name
+            if suggested != db_name or not db:
+                self._log(f"🔍 自动选择特征库: {suggested}")
+                self.root.after(0, lambda: self._db_var.set(suggested))
+                db = get_or_build_database(suggested, log_fn=self._log)
+                self._database = db
+                self._db_name  = suggested
+
+            if not db:
+                self._log("❌ 特征库为空，无法识别。请先建库或检查 ./data 文件夹")
+                self._set_busy(False)
+                return
+
+            mn = self._min_neighbors_var.get()
+
+            if suffix in IMAGE_EXTS:
+                self._log(f"\n🖼  图片: {path}")
+                process_image_file(
                     source=path,
-                    database=self._database,
+                    database=db,
                     threshold=self._threshold_var.get(),
+                    min_neighbors=mn,
                     log_fn=self._log,
                     preview_fn=self._show_frame_cv,
                     done_fn=lambda: self._set_busy(False),
-                ),
-                daemon=True
-            ).start()
-
-        elif suffix in VIDEO_EXTS:
-            self._log(f"\n🎬  视频: {path}")
-            out = self._out_var.get().strip() or None
-            threading.Thread(
-                target=process_video_file,
-                kwargs=dict(
+                )
+            elif suffix in VIDEO_EXTS:
+                self._log(f"\n🎬  视频: {path}")
+                out = self._out_var.get().strip() or None
+                process_video_file(
                     source=path,
-                    database=self._database,
+                    database=db,
                     output_path=out,
                     threshold=self._threshold_var.get(),
                     skip_frames=self._skip_var.get(),
+                    min_neighbors=mn,
                     log_fn=self._log,
                     preview_fn=self._show_frame_cv,
                     stop_event=self._stop_evt,
                     done_fn=lambda: self._set_busy(False),
-                ),
-                daemon=True
-            ).start()
-        else:
-            self._log(f"⚠️  不支持的文件格式: {suffix}")
-            self._set_busy(False)
+                )
+            else:
+                self._log(f"⚠️  不支持的文件格式: {suffix}")
+                self._set_busy(False)
+
+        threading.Thread(target=_load_and_run, daemon=True).start()
 
     def _stop_processing(self):
         self._stop_evt.set()

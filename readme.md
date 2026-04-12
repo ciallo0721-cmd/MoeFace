@@ -1,8 +1,27 @@
 # MoeFace - 动漫人脸识别系统
 
-MoeFace 是一个专为动漫/虚拟主播角色设计的人脸识别系统，支持图片特征库构建、视频实时识别、摄像头实时检测等功能，可自动识别视频中的特定动漫角色并标注名称和相似度。
+> 🌸 基于 FaceNet + LBP 动漫人脸检测的角色识别工具，支持图片/视频识别、GUI 拖拽操作、角色特征库自动构建。
+>
+> **示例效果**：将含有动漫角色的视频/图片拖入窗口，系统自动框出人脸并标注角色名 + 相似度分数。详见下方 [Bug 截图示例](#注意事项)（含误识别说明）。
 
-## 目录结构
+---
+
+## 目录
+
+- [目录结构](#目录结构)
+- [功能特点](#功能特点)
+- [环境要求](#环境要求)
+- [安装步骤](#安装步骤)
+- [使用指南](#使用指南)
+- [关键词映射](#关键词映射)
+- [注意事项](#注意事项)
+- [自定义配置](#自定义配置)
+- [故障排除](#故障排除)
+- [免责声明](#免责声明)
+
+---
+
+## 目录结构 <a name="目录结构"></a>
 ```
 MoeFace/
 ├── data/               # 角色图片库（每个角色一个文件夹）
@@ -20,7 +39,7 @@ MoeFace/
 └── readme.md           # 使用说明
 ```
 
-## 功能特点
+## 功能特点 <a name="功能特点"></a>
 - 🎭 **动漫人脸检测**：基于OpenCV的动漫人脸分类器，精准检测动漫/虚拟主播人脸
 - 🧠 **特征提取与匹配**：使用FaceNet模型提取人脸特征，余弦相似度匹配
 - 📸 **批量图片爬取**：自动从必应图片爬取指定角色图片，构建特征库
@@ -32,12 +51,12 @@ MoeFace/
 ## 示例
 [taffy.mp4](https://github.com/ciallo0721-cmd/MoeFace/releases/download/moeface/taffy.mp4)
 
-## 环境要求
+## 环境要求 <a name="环境要求"></a>
 - Python 3.7+
 - Windows/Linux/macOS
 - 可选：NVIDIA GPU（CUDA）加速
 
-## 安装步骤
+## 安装步骤 <a name="安装步骤"></a>
 
 ### 1. 安装依赖
 ```bash
@@ -53,6 +72,7 @@ requirements.txt 包含以下核心依赖：
 - pillow
 - requests
 - beautifulsoup4
+- tkinterdnd2（拖拽支持，**必须安装**，否则拖拽功能不可用）
 - moviepy（可选，用于保留视频音频）
 
 ### 2. 准备分类器文件
@@ -61,7 +81,7 @@ requirements.txt 包含以下核心依赖：
 ### 3. 中文字体
 `simhei.ttf` 字体文件已提供，用于显示中文角色名称
 
-## 使用指南
+## 使用指南 <a name="使用指南"></a>
 
 ### 一、构建角色图片库
 
@@ -125,14 +145,23 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
 | --db_name | 指定特征库名称 | 自动识别 |
 | --list | 列出可用特征库 | False |
 
-## 关键词映射
-系统内置了关键词映射，例如：
+## 关键词映射 <a name="关键词映射"></a>
+系统通过 `cname/name.json` 管理关键词映射（**已从代码中独立出来，无需修改 Python 文件**），例如：
 - "塔菲"、"雏草姬" → 永雏塔菲
 - "东雪莲"、"罕见" → 东雪莲
 - "Neuro"、"牛肉" → Neuro-sama
-- 可在 `recognize.py` 的 `KEYWORD_MAPPING` 中自定义
 
-## 注意事项
+`cname/name.json` 格式示例：
+```json
+[
+  {"db_name": "永雏塔菲", "aliases": ["塔菲", "雏草姬", "Taffy"]},
+  {"db_name": "初音未来", "aliases": ["初音", "Miku", "Hatsune"]}
+]
+```
+
+你可以在 GUI 中点击「⚙ 管理角色别名」按钮直接编辑，无需手动修改 JSON 文件。
+
+## 注意事项 <a name="注意事项"></a>
 
 1. **识别精度**：
    - 阈值（threshold）默认0.45，值越高越严格，越低越宽松
@@ -165,12 +194,12 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
    ![image](./demo/6.png)
    ![image](./demo/7.png)
 
-## 自定义配置
+## 自定义配置 <a name="自定义配置"></a>
 
 ### 1. 添加新角色
-1. 在 `data/` 目录创建新角色文件夹
-2. 在 `爬虫.py` 中添加角色的关键词（可选）
-3. 在 `recognize.py` 的 `KEYWORD_MAPPING` 中添加关键词映射（可选）
+1. 在 `data/` 目录创建新角色文件夹，放入该角色的图片
+2. 在 `爬虫.py` 中添加角色的搜索关键词（可选，用于自动爬取）
+3. 在 GUI 中点击「⚙ 管理角色别名」，在 `cname/name.json` 里添加该角色的别名配置（可选，用于文件名自动匹配特征库）
 
 ### 2. 修改识别参数
 - 调整 `recognize.py` 中的 `threshold` 改变识别灵敏度
@@ -181,7 +210,7 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
 - 可修改爬取数量（MAX_IMAGES_PER_ROLE）
 - 调整并发下载线程数（DOWNLOAD_THREADS）
 
-## 故障排除
+## 故障排除 <a name="故障排除"></a>
 
 1. **分类器加载失败**：
    - 检查 `lbpcascade_animeface.xml` 文件是否存在
@@ -200,6 +229,10 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
    - 安装 moviepy：`pip install moviepy`
    - 检查输出视频格式是否支持音频
 
+5. **拖拽功能无效**：
+   - 安装 tkinterdnd2：`pip install tkinterdnd2`
+   - 重启程序后生效
+
 5. **CUDA Out of Memory**：
    - 降低批处理大小
    - 使用CPU模式（自动 fallback）
@@ -207,7 +240,8 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
 ## 许可证
 本项目基于开源许可证发布（详见 LICENSE 文件）
 
-## 免责声明
-- 爬虫脚本仅用于学习研究，请勿用于商业用途
-- 请遵守目标网站的robots协议
-- 本项目仅用于个人学习和非商业用途
+## 免责声明 <a name="免责声明"></a>
+- **本项目不提供任何受版权保护的图片素材**。`data/` 目录中的图片仅为作者本地测试用途，使用者应自行确认所收集图片的版权归属，并对其使用行为负责
+- 爬虫脚本仅用于学习研究，请遵守目标网站的 robots 协议，勿用于商业用途
+- **本工具仅供个人娱乐/学习用途，不得用于未经当事人同意的身份识别、追踪或监控**
+- 本项目基于开源许可证发布（详见 LICENSE 文件）
