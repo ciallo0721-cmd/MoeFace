@@ -1,7 +1,7 @@
 [
   {
     "db_name": "永雏塔菲",
-    "aliases": ["塔菲", "雏草姬", "Taffy"]
+    "aliases": ["塔菲", "雏草姬", "Taffy","唐人","唐小菲","关注塔菲喵","关注塔菲谢谢喵"]
   },
   {
     "db_name": "东雪莲",
@@ -41,7 +41,7 @@
   },
   {
     "db_name": "Sayori",
-    "aliases": ["Sayori", "纱世里", "小夜"]
+    "aliases": ["Sayori", "纱世里"]
   },
   {
     "db_name": "三司绫濑",
@@ -49,7 +49,7 @@
   },
   {
     "db_name": "初音未来",
-    "aliases": ["初音未来", "初音", "Miku", "Hatsune", "葱娘", "米库"]
+    "aliases": ["初音未来", "初音", "Miku", "Hatsune","米库"]
   },
   {
     "db_name": "千早爱音",
@@ -102,5 +102,33 @@
   {
     "db_name": "井芹仁菜",
     "aliases": ["井芹仁菜", "仁菜", "Nina", "Iseri", "仁菜菜"]
-  }
+  },
+  {
+    "db_name": "kizuna ai",
+    "aliases": ["绊爱", "Kizuna Ai", "Kizuna", "AI"]
+  },
+  {
+    "db_name": "Kobe Bryant",
+    "aliases": ["科比","科比 布莱恩特","Kobe","Bryant"]
+  },
+  {
+    "db_name": "卢本伟",
+    "aliases": []
+  },
+  {
+    "db_name": "奶龙",
+    "aliases": ["nailong", "奶龙",]
+  },
+  {
+    "db_name": "禁漫娘",
+    "aliases": ["jm","jmcomic","JMcomic","jm娘"]
+  },
+  {
+    "db_name": "董卓",
+    "aliases": ["350234","350235","苦命鸳鸯"]
+  },
+  {
+    "db_name": "重音teto",
+    "aliases": ["红色钻头","TETO","teto"]
+  },
 ]
