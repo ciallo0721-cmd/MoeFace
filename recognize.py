@@ -2,6 +2,10 @@
 MoeFace — 动漫人脸识别系统
 GUI 版本 (Tkinter)
 """
+
+"""
+带"～(｡•́︿•̀｡)"是严重错误
+"""
 import os
 import sys
 import json
@@ -52,14 +56,14 @@ def load_alias_map(path: Path = CNAME_PATH):
         {"db_name": "角色名", "aliases": ["别名1", "别名2", ...]}
     """
     if not path.exists():
-        warnings.warn(f"别名配置文件不存在: {path}")
+        warnings.warn(f"(｡•́︿•̀｡),主人,别名配置文件丢了喵: {path}")
         return []
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data
     except Exception as e:
-        warnings.warn(f"加载别名配置失败: {e}")
+        warnings.warn(f"(｡•́︿•̀｡),主人,加载别名配置失败: {e}")
         return []
 
 ALIAS_MAP = load_alias_map()
@@ -101,7 +105,7 @@ def load_database_from_json(json_name: str):
             raw = json.load(f)
         return {n: np.array(e) for n, e in raw.items()}
     except Exception as e:
-        warnings.warn(f"加载特征库失败: {e}")
+        warnings.warn(f"(｡•́︿•̀｡),主人,加载特征库失败了: {e}")
         return None
 
 
@@ -127,23 +131,23 @@ def _ensure_models(log_fn=print):
 
             cascade_p = str(CASCADE_PATH)
             if not CASCADE_PATH.exists():
-                log_fn("❌ 找不到 lbpcascade_animeface.xml")
+                log_fn("❌ (｡•́︿•̀｡),找不到 lbpcascade_animeface.xml")
                 return False
             clf = cv2.CascadeClassifier(cascade_p)
             if clf.empty():
-                log_fn("❌ CascadeClassifier 加载失败")
+                log_fn("❌ (｡•́︿•̀｡),CascadeClassifier 加载失败")
                 return False
             _anime_cascade = clf
 
-            log_fn("正在加载 FaceNet 模型（首次可能需要几秒）...")
+            log_fn("正在加载 FaceNet 模型喵~（首次可能需要几秒）...")
             _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             _resnet = InceptionResnetV1(pretrained="vggface2").eval().to(_device)
-            log_fn(f"✅ 模型加载完成（{'GPU' if _device.type == 'cuda' else 'CPU'}）")
+            log_fn(f"✅ 模型加载完成了,主人~（{'GPU' if _device.type == 'cuda' else 'CPU'}）")
 
             _models_ready = True
             return True
         except Exception as e:
-            log_fn(f"❌ 模型初始化失败: {e}")
+            log_fn(f"❌ (｡•́︿•̀｡),模型初始化失败: {e}")
             traceback.print_exc()
             return False
 
@@ -184,7 +188,7 @@ def build_database(data_root: Path, log_fn=print):
     import numpy as np
     database = {}
     if not data_root.exists():
-        log_fn(f"❌ 路径不存在: {data_root}")
+        log_fn(f"❌呜呜呜,主人,路径不存在喵～(｡•́︿•̀｡): {data_root}")
         return database
 
     subdirs = [d for d in data_root.iterdir() if d.is_dir()]
@@ -220,7 +224,7 @@ def build_database(data_root: Path, log_fn=print):
                 database[person_dir.name] = avg
                 log_fn(f"  ✅ {person_dir.name}")
             else:
-                log_fn(f"  ⚠️  无有效人脸")
+                log_fn(f"  ⚠️  无有效人脸喵～(｡•́︿•̀｡)")
     else:
         imgs = _gather(data_root)
         if not imgs:
@@ -242,19 +246,19 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print):
             return db
 
     if db_name == DEFAULT_DB_NAME:
-        log_fn("构建全部特征库...")
+        log_fn("构建全部特征库喵...")
         db = build_database(DATA_DIR, log_fn)
     else:
         db_path = DATA_DIR / db_name
         if not db_path.exists():
             log_fn(f"❌ 文件夹不存在: {db_path}")
             return {}
-        log_fn(f"构建特征库: {db_name}")
+        log_fn(f"构建特征库喵~: {db_name}")
         db = build_database(db_path, log_fn)
 
     if db:
         save_database_to_json(db, db_name)
-        log_fn(f"✅ 特征库已缓存，共 {len(db)} 个角色")
+        log_fn(f"✅ 特征库已缓存喵~，共 {len(db)} 个角色")
     return db
 
 
@@ -331,7 +335,7 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             data = np.frombuffer(f.read(), dtype=np.uint8)
         img = cv2.imdecode(data, cv2.IMREAD_COLOR)
         if img is None:
-            log_fn("❌ 无法读取图片")
+            log_fn("❌ 无法读取图片喵~")
             if done_fn: done_fn()
             return
 
@@ -359,7 +363,7 @@ def process_image_file(source: str, database: dict, threshold=0.45,
         if preview_fn:
             preview_fn(img)
     except Exception:
-        log_fn(f"❌ 处理图片出错:\n{traceback.format_exc()}")
+        log_fn(f"❌ 呜呜呜,(｡•́︿•̀｡)处理图片出错了:\n{traceback.format_exc()}")
     finally:
         if done_fn: done_fn()
 
@@ -372,7 +376,7 @@ def process_video_file(source: str, database: dict, output_path=None,
     import cv2
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        log_fn(f"❌ 无法打开视频: {source}")
+        log_fn(f"❌ 无法打开视频喵~: {source}")
         if done_fn: done_fn()
         return
 
@@ -446,7 +450,7 @@ def process_video_file(source: str, database: dict, output_path=None,
     if output_path and tmp_out and os.path.exists(tmp_out):
         log_fn("正在合并音频...")
         _add_audio(source, output_path, tmp_out)
-        log_fn(f"📁 已保存: {output_path}")
+        log_fn(f" 已保存: {output_path}了喵~")
 
     if done_fn:
         done_fn()
@@ -496,11 +500,11 @@ class MoeFaceApp:
         hdr = tk.Frame(root, bg=ACCENT, height=48)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        tk.Label(hdr, text="🌸  MoeFace  动漫人脸识别",
+        tk.Label(hdr, text="  MoeFace  动漫人脸识别",
                  font=("微软雅黑", 14, "bold"),
                  bg=ACCENT, fg="white").pack(side="left", padx=16, pady=8)
 
-        self._status_lbl = tk.Label(hdr, text="⏳ 正在初始化…",
+        self._status_lbl = tk.Label(hdr, text=" 正在初始化…",
                                     font=("微软雅黑", 10),
                                     bg=ACCENT, fg="#e9d5ff")
         self._status_lbl.pack(side="right", padx=16)
@@ -556,9 +560,9 @@ class MoeFaceApp:
                          arrowcolor="#cdd6f4")
 
         # — 重建特征库按钮 —
-        self._btn(parent, "🔨 重建特征库", self._rebuild_db,
+        self._btn(parent, " 重建特征库", self._rebuild_db,
                   ACCENT).pack(fill="x", padx=10, pady=(4, 2))
-        self._btn(parent, "📂 加载特征库", self._load_db_now,
+        self._btn(parent, " 加载特征库", self._load_db_now,
                   "#374151").pack(fill="x", padx=10, pady=2)
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
@@ -631,7 +635,7 @@ class MoeFaceApp:
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
         # — 打开文件按钮 —
-        self._btn(parent, "🖼  打开图片/视频", self._open_file,
+        self._btn(parent, "  打开图片/视频", self._open_file,
                   ACCENT).pack(fill="x", padx=10, pady=2)
         self._stop_btn = self._btn(parent, "⏹  停止处理", self._stop_processing,
                                    "#dc2626", state="disabled")
@@ -640,9 +644,9 @@ class MoeFaceApp:
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
         # — 别名管理入口 —
-        self._btn(parent, "⚙  管理角色别名", self._open_alias_editor,
+        self._btn(parent, " 管理角色别名", self._open_alias_editor,
                   "#374151").pack(fill="x", padx=10, pady=2)
-        self._btn(parent, "🗑  清空日志", self._clear_log,
+        self._btn(parent, " 清空日志", self._clear_log,
                   "#374151").pack(fill="x", padx=10, pady=2)
 
     def _build_right(self, parent, DARK, PANEL, TEXT, MUTED):
@@ -670,7 +674,7 @@ class MoeFaceApp:
         else:
             # 无 tkinterdnd2 时显示提示
             self._drop_label.config(
-                text="将图片或视频拖拽到此处（需安装 tkinterdnd2）\n或点击左侧「打开图片/视频」按钮\n\n支持 JPG / PNG / MP4 / AVI / MKV 等"
+                text="主人,将图片或视频拖拽到此处喵~（需安装 tkinterdnd2）\n或点击左侧「打开图片/视频」按钮\n\n支持 JPG / PNG / MP4 / AVI / MKV 等"
             )
 
         # 下方：日志
@@ -692,7 +696,7 @@ class MoeFaceApp:
             if ok:
                 self._set_status("✅ 就绪，请拖入文件")
             else:
-                self._set_status("❌ 模型加载失败，请检查依赖")
+                self._set_status("❌ 模型加载失败(｡•́︿•̀｡)，请检查依赖")
         threading.Thread(target=_run, daemon=True).start()
 
     # ── 日志 ──────────────────────────────────────────────────────────────
@@ -751,7 +755,7 @@ class MoeFaceApp:
 
     def _rebuild_db(self):
         db_name = self._db_var.get()
-        self._log(f"🔨 强制重建: {db_name}")
+        self._log(f" 强制重建: {db_name}")
         def _run():
             db = get_or_build_database(db_name, force_rebuild=True, log_fn=self._log)
             self._database = db
@@ -796,7 +800,7 @@ class MoeFaceApp:
 
     def _dispatch_file(self, path: str):
         if not _models_ready:
-            self._log("⏳ 模型尚未加载完成，请稍候…")
+            self._log("模型尚未加载完成，请稍候…")
             return
         if self._busy:
             self._log("⚠️  正在处理中，请等待完成或点击停止")
@@ -813,7 +817,7 @@ class MoeFaceApp:
             db = self._database
             db_name = self._db_name
             if suggested != db_name or not db:
-                self._log(f"🔍 自动选择特征库: {suggested}")
+                self._log(f" 自动选择特征库: {suggested}")
                 self.root.after(0, lambda: self._db_var.set(suggested))
                 db = get_or_build_database(suggested, log_fn=self._log)
                 self._database = db
