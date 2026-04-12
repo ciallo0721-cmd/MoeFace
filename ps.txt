@@ -1,0 +1,2 @@
+2026年4月12日
+ps:有一个exe版本的,无需python环境就能用的,在https://github.com/ciallo0721-cmd/MoeFace/releases/download/v3.0/Moeface.rar
