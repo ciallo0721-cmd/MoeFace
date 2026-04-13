@@ -1336,7 +1336,7 @@ class MoeFaceCLI:
         sorted_names = sorted(self.stats["found_names"].items(),
                              key=lambda x: x[1], reverse=True)
         for name, count in sorted_names:
-            pct = count / sum(self.stats["found_names'].values()) * 100
+            pct = count / sum(self.stats["found_names"].values()) * 100
             bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
             CLIColors.p(f"  {CLIColors.SUCCESS}{name:<15}{CLIColors.RESET}"
                         f" {bar} {CLIColors.MUTED}{count} 次 ({pct:4.1f}%)"
