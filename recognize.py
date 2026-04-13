@@ -1,6 +1,6 @@
 """
 MoeFace — 动漫人脸识别系统
-GUI 版本 (Tkinter)
+GUI 版本 (Tkinter) + CLI 版本 (终端图形化)
 """
 
 """
@@ -14,7 +14,9 @@ import warnings
 import shutil
 import tempfile
 import traceback
+import argparse
 from pathlib import Path
+from datetime import datetime
 
 # ── 确保以脚本所在目录为基准路径 ────────────────────────────────────────────
 import sys as _sys
@@ -925,7 +927,562 @@ class MoeFaceApp:
         self.root.mainloop()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  CLI 模式（终端图形化界面）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CLIColors:
+    """ANSI 终端颜色"""
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+
+    # 前景色
+    BLACK   = "\033[30m"
+    RED     = "\033[31m"
+    GREEN   = "\033[32m"
+    YELLOW  = "\033[33m"
+    BLUE    = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN    = "\033[36m"
+    WHITE   = "\033[37m"
+
+    # 亮色
+    LGRAY   = "\033[90m"
+    LRED    = "\033[91m"
+    LGREEN  = "\033[92m"
+    LYELLOW = "\033[93m"
+    LBLUE   = "\033[94m"
+    LMAGENTA= "\033[95m"
+    LCYAN   = "\033[96m"
+    LWHITE  = "\033[97m"
+
+    # 背景色
+    BGBLACK  = "\033[40m"
+    BGRED    = "\033[41m"
+    BGGREEN  = "\033[42m"
+    BGYELLOW = "\033[43m"
+    BGBLUE   = "\033[44m"
+    BGMAGENTA= "\033[45m"
+    BGCYAN   = "\033[46m"
+    BGWHITE  = "\033[47m"
+
+    # 合成
+    HEADER  = BOLD + LGRAY
+    TITLE   = BOLD + MAGENTA
+    SUCCESS = BOLD + LGREEN
+    WARNING = BOLD + LYELLOW
+    ERROR   = BOLD + LRED
+    INFO    = BOLD + LCYAN
+    MUTED   = DIM + LGRAY
+    PROGRESS_BG = BGWHITE
+    PROGRESS_FG = BGGREEN
+
+    @staticmethod
+    def p(text, color="", end="\n"):
+        """打印彩色文本"""
+        if color:
+            print(f"{color}{text}{CLIColors.RESET}", end=end)
+        else:
+            print(text, end=end)
+
+    @staticmethod
+    def clear_line():
+        """清除当前行"""
+        sys.stdout.write("\033[2K\r")
+        sys.stdout.flush()
+
+    @staticmethod
+    def progress_bar(percent: float, width: int = 40,
+                     fg_color=None, bg_color=None):
+        """生成进度条字符串"""
+        filled = int(width * percent)
+        empty  = width - filled
+        bar = "█" * filled + "░" * empty
+        percent_str = f"{percent * 100:5.1f}%"
+        fg = fg_color or CLIColors.PROGRESS_FG
+        bg = bg_color or CLIColors.PROGRESS_BG
+        return f"{fg}{CLIColors.BOLD}{bar}{CLIColors.RESET} {fg}{percent_str}{CLIColors.RESET}"
+
+
+class MoeFaceCLI:
+    """CLI 模式主类"""
+
+    BANNER = rf"""{CLIColors.TITLE}
+    ╔═══════════════════════════════════════════════════╗
+    ║                                                   ║
+    ║   ███╗   ██╗███████╗██╗  ██╗██╗   ██╗            ║
+    ║   ████╗  ██║██╔════╝╚██╗██╔╝██║   ██║            ║
+    ║   ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║            ║
+    ║   ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║            ║
+    ║   ██║ ╚████║███████╗██╔╝ ╚██╗╚██████╔╝            ║
+    ║   ╚═╝  ╚═══╝╚══════╝╚═╝   ╚═╝ ╚═════╝             ║
+    ║              Face Recognition System               ║
+    ╚═══════════════════════════════════════════════════╝
+    {CLIColors.RESET}"""
+
+    def __init__(self, args):
+        self.args      = args
+        self.db        = {}
+        self.stats     = {"total_frames": 0, "processed": 0,
+                          "found_names": {}, "errors": 0}
+        self.stop_evt  = threading.Event()
+        self._console_height = 0
+        self._last_pct = -1.0
+
+    # ── 工具方法 ─────────────────────────────────────────────────────────
+    def _log(self, msg: str, level: str = "info"):
+        """带颜色的日志输出"""
+        now  = datetime.now().strftime("%H:%M:%S")
+        icons = {"info": "ℹ", "ok": "✓", "warn": "⚠", "error": "✗",
+                 "skip": "➜", "done": "✓"}
+        icon  = icons.get(level, "·")
+        color = {"info": CLIColors.INFO, "ok": CLIColors.SUCCESS,
+                 "warn": CLIColors.WARNING, "error": CLIColors.ERROR,
+                 "skip": CLIColors.MUTED, "done": CLIColors.SUCCESS}.get(level, "")
+        CLIColors.p(f"  {icon}  {msg}", color)
+
+    def _header(self, title: str):
+        """分组标题"""
+        CLIColors.p(f"\n{CLIColors.HEADER}{'─' * 50}{CLIColors.RESET}", end="")
+        CLIColors.p(f"{CLIColors.HEADER} {title}{CLIColors.RESET}")
+
+    def _progress(self, current: int, total: int, label: str = ""):
+        """更新进度条（同一行覆盖）"""
+        if total <= 0:
+            return
+        pct = min(current / total, 1.0)
+        bar = CLIColors.progress_bar(pct, width=36)
+        label_text = f" {label}" if label else ""
+        line = f"\r  {bar}{label_text}"
+        CLIColors.clear_line()
+        print(line, end="", flush=True)
+        self._last_pct = pct
+
+    def _stat_row(self, name: str, count: int, color: str = ""):
+        """统计行"""
+        fg = color or CLIColors.SUCCESS
+        CLIColors.p(f"  {CLIColors.MUTED}├─{CLIColors.RESET} {fg}{name}{CLIColors.RESET}"
+                    f" {CLIColors.MUTED}({count} 次){CLIColors.RESET}")
+
+    # ── 主流程 ───────────────────────────────────────────────────────────
+    def run(self):
+        # 打印 Banner
+        print(self.BANNER)
+
+        # 步骤 1: 加载模型
+        self._header("① 加载模型")
+        CLIColors.p(f"  设备: {CLIColors.INFO}"
+                    f"{'NVIDIA GPU (CUDA)' if os.path.exists('/dev/nvidia0') or shutil.which('nvidia-smi') else 'CPU'}"
+                    f"{CLIColors.RESET}")
+        if not _ensure_models(lambda m: self._log(m, "info" if "✓" in m or "✅" in m else "warn")):
+            self._log("模型加载失败，主人～(｡•́︿•̀｡)", "error")
+            sys.exit(1)
+
+        # 步骤 2: 加载特征库
+        self._header("② 加载特征库")
+        db_name = self.args.get("db_name") or DEFAULT_DB_NAME
+        CLIColors.p(f"  特征库: {CLIColors.INFO}{db_name}{CLIColors.RESET}")
+        force_rebuild = self.args.get("rebuild", False)
+        self.db = get_or_build_database(db_name, force_rebuild=force_rebuild,
+                                        log_fn=lambda m: None)
+        if not self.db:
+            self._log("特征库为空，请检查 ./data 文件夹或添加角色图片", "error")
+            sys.exit(1)
+        CLIColors.p(f"  已加载 {CLIColors.SUCCESS}{len(self.db)}{CLIColors.RESET} "
+                    f"个角色特征{CLIColors.MUTED}，就绪~{CLIColors.RESET}")
+
+        # 步骤 3: 执行识别
+        source = self.args.get("source")
+        output = self.args.get("output")
+        camera = self.args.get("camera", False)
+
+        if camera:
+            self._header("③ 摄像头模式")
+            self._log("按 Ctrl+C 或 Ctrl+Break 停止", "warn")
+            self._run_camera()
+        elif source:
+            suffix = Path(source).suffix.lower()
+            if suffix in IMAGE_EXTS:
+                self._header("③ 识别图片")
+                self._run_image(source)
+            elif suffix in VIDEO_EXTS:
+                self._header("③ 识别视频")
+                self._log(f"输入: {source}")
+                self._log(f"输出: {output or '仅预览（无保存）'}")
+                self._run_video(source, output)
+            else:
+                self._log(f"不支持的文件格式: {suffix}", "error")
+                sys.exit(1)
+        else:
+            self._log("请指定 --source（文件路径）或 --camera（摄像头模式）", "error")
+            self._print_help()
+            sys.exit(1)
+
+        # 步骤 4: 统计报告
+        self._print_report()
+
+    def _run_image(self, path: str):
+        """识别单张图片"""
+        self._log(f"文件: {CLIColors.INFO}{path}{CLIColors.RESET}")
+        threshold    = self.args.get("threshold", 0.45)
+        min_neighbors = self.args.get("min_neighbors", 3)
+
+        results = []
+        import cv2, numpy as np
+
+        with open(path, "rb") as f:
+            data = np.frombuffer(f.read(), dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is None:
+            self._log("无法读取图片喵~", "error")
+            return
+
+        gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = _anime_cascade.detectMultiScale(
+            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+            minSize=(20, 20), maxSize=(800, 800)
+        )
+        self._log(f"检测到 {CLIColors.SUCCESS}{len(faces)}{CLIColors.RESET} 张人脸")
+
+        for (x, y, w, h) in faces:
+            x1, y1 = max(0, x), max(0, y)
+            x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
+            face = img[y1:y2, x1:x2]
+            if face.size == 0:
+                continue
+            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+            name, score = recognize_face(face_rgb, self.db, threshold)
+            tag = CLIColors.SUCCESS if name else CLIColors.MUTED
+            self._log(f"  {tag}{name or '未知'}{CLIColors.RESET} "
+                      f"{CLIColors.MUTED}({score:.2f}){CLIColors.RESET} "
+                      f"@ ({x1},{y1},{w}×{h})", "ok" if name else "skip")
+            results.append((name, score))
+            if name:
+                self.stats["found_names"][name] = \
+                    self.stats["found_names"].get(name, 0) + 1
+
+        # 保存结果图
+        output = self.args.get("output")
+        if output and results:
+            draw = img.copy()
+            for (x, y, w, h), (name, score) in zip(faces, results):
+                x1, y1 = max(0, x), max(0, y)
+                x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
+                cv2.rectangle(draw, (x1,y1),(x2,y2),(0,255,0),2)
+                color = (0,255,0) if name else (128,128,128)
+                draw = draw_chinese_text(draw,
+                    f"{name or '未知'} ({score:.2f})",
+                    (x1, max(0,y1-25)), 18, color)
+            cv2.imwrite(output, draw)
+            self._log(f"已保存标注图: {output}", "ok")
+        elif not results:
+            self._log("未检测到任何人脸", "warn")
+
+    def _run_video(self, source: str, output_path: str):
+        """识别视频文件"""
+        threshold    = self.args.get("threshold", 0.45)
+        skip_frames  = self.args.get("skip_frames", 2)
+        min_neighbors = self.args.get("min_neighbors", 3)
+
+        import cv2, numpy as np
+
+        cap = cv2.VideoCapture(source)
+        if not cap.isOpened():
+            self._log(f"无法打开视频喵~: {source}", "error")
+            return
+
+        fps   = cap.get(cv2.CAP_PROP_FPS) or 25
+        w     = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h     = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        self._log(f"视频: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
+        CLIColors.p("")  # 换行，开始进度条
+
+        out = tmp_out = None
+        if output_path:
+            tmp_dir = Path(output_path).parent / "temp"
+            tmp_dir.mkdir(exist_ok=True)
+            tmp_fd, tmp_out = tempfile.mkstemp(suffix=".mp4", dir=str(tmp_dir))
+            os.close(tmp_fd)
+            out = cv2.VideoWriter(tmp_out, cv2.VideoWriter_fourcc(*"mp4v"),
+                                  fps, (w, h))
+
+        frame_idx = 0
+        try:
+            while True:
+                if self.stop_evt.is_set():
+                    CLIColors.p(f"\n  {CLIColors.WARNING}⏹ 已停止{CLIColors.RESET}")
+                    break
+
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                self.stats["total_frames"] += 1
+
+                if total > 0:
+                    self._progress(frame_idx, total,
+                                   f"帧 {frame_idx}/{total}")
+
+                if frame_idx % skip_frames == 0:
+                    gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    faces = _anime_cascade.detectMultiScale(
+                        gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                        minSize=(20,20), maxSize=(800,800)
+                    )
+                    for (x, y, fw, fh) in faces:
+                        x1, y1 = max(0,x), max(0,y)
+                        x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
+                        face = frame[y1:y2, x1:x2]
+                        if face.size == 0:
+                            continue
+                        face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                        name, score = recognize_face(face_rgb, self.db, threshold)
+                        if name:
+                            cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                            frame = draw_chinese_text(frame,
+                                f"{name} ({score:.2f})",
+                                (x1, max(0,y1-25)), 16, (0,255,0))
+                            self.stats["found_names"][name] = \
+                                self.stats["found_names"].get(name, 0) + 1
+
+                    self.stats["processed"] += 1
+
+                if out:
+                    out.write(frame)
+                frame_idx += 1
+
+        finally:
+            cap.release()
+            if out:
+                out.release()
+
+        CLIColors.clear_line()
+        CLIColors.p(f"  {CLIColors.SUCCESS}✓ 处理完成{CLIColors.RESET}："
+                    f" {frame_idx} 帧，识别了 {self.stats['processed']} 个关键帧")
+
+        if output_path and tmp_out and os.path.exists(tmp_out):
+            self._log("正在合并音频...")
+            _add_audio(source, output_path, tmp_out)
+            self._log(f"已保存: {output_path}", "ok")
+
+    def _run_camera(self):
+        """摄像头实时识别"""
+        threshold    = self.args.get("threshold", 0.45)
+        min_neighbors = self.args.get("min_neighbors", 3)
+
+        import cv2
+        camera_id = self.args.get("camera_id", 0)
+        cap = cv2.VideoCapture(camera_id)
+        if not cap.isOpened():
+            self._log(f"无法打开摄像头 {camera_id}喵~", "error")
+            return
+
+        self._log(f"摄像头 {camera_id} 已启动，按 Q 退出")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        delay_ms = max(int(1000 / fps), 1)
+
+        try:
+            while not self.stop_evt.is_set():
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+
+                gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = _anime_cascade.detectMultiScale(
+                    gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                    minSize=(20,20), maxSize=(800,800)
+                )
+                for (x, y, fw, fh) in faces:
+                    x1, y1 = max(0,x), max(0,y)
+                    x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
+                    face = frame[y1:y2, x1:x2]
+                    if face.size == 0:
+                        continue
+                    face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                    name, score = recognize_face(face_rgb, self.db, threshold)
+                    cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                    frame = draw_chinese_text(frame,
+                        f"{name or '?'} ({score:.2f})",
+                        (x1, max(0,y1-25)), 14, (0,255,0))
+
+                cv2.imshow("MoeFace CLI (按 Q 退出)", frame)
+                if cv2.waitKey(delay_ms) & 0xFF in (ord("q"), ord("Q")):
+                    break
+        finally:
+            cap.release()
+            cv2.destroyAllWindows()
+            self._log("摄像头已关闭", "done")
+
+    def _print_report(self):
+        """打印识别报告"""
+        if not self.stats["found_names"]:
+            CLIColors.p("")
+            self._log("未识别到任何已知角色喵~", "warn")
+            return
+
+        CLIColors.p("")
+        self._header("④ 识别报告")
+        CLIColors.p(f"  总帧数: {CLIColors.INFO}{self.stats['total_frames']}"
+                    f"{CLIColors.RESET}，"
+                    f"关键帧: {CLIColors.INFO}{self.stats['processed']}"
+                    f"{CLIColors.RESET}，"
+                    f"识别次数: {CLIColors.SUCCESS}"
+                    f"{sum(self.stats['found_names'].values())}"
+                    f"{CLIColors.RESET}")
+        CLIColors.p(f"  角色分布:")
+        sorted_names = sorted(self.stats["found_names"].items(),
+                             key=lambda x: x[1], reverse=True)
+        for name, count in sorted_names:
+            pct = count / sum(self.stats["found_names'].values()) * 100
+            bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+            CLIColors.p(f"  {CLIColors.SUCCESS}{name:<15}{CLIColors.RESET}"
+                        f" {bar} {CLIColors.MUTED}{count} 次 ({pct:4.1f}%)"
+                        f"{CLIColors.RESET}")
+        CLIColors.p("")
+        self._log("识别完成~ 主人再见喵！(｡•́︿•̀｡)", "done")
+
+    def _print_help(self):
+        """打印帮助"""
+        print(f"""
+{CLIColors.TITLE}用法:{CLIColors.RESET}
+  {CLIColors.CYAN}python recognize.py --mode cli --source <文件>{CLIColors.RESET}
+  {CLIColors.CYAN}python recognize.py --mode gui{CLIColors.RESET}
+
+{CLIColors.TITLE}CLI 参数:{CLIColors.RESET}
+  {CLIColors.LGREEN}--mode{CLIColors.RESET}         运行模式: gui / cli (默认: cli)
+  {CLIColors.LGREEN}--source{CLIColors.RESET}       视频或图片路径
+  {CLIColors.LGREEN}--camera{CLIColors.RESET}       启用摄像头模式
+  {CLIColors.LGREEN}--camera-id{CLIColors.RESET}    摄像头 ID (默认: 0)
+  {CLIColors.LGREEN}--output{CLIColors.RESET}        输出视频/图片路径
+  {CLIColors.LGREEN}--db-name{CLIColors.RESET}       特征库名称 (默认: 全部特征库)
+  {CLIColors.LGREEN}--threshold{CLIColors.RESET}     识别阈值 0.1~0.95 (默认: 0.45)
+  {CLIColors.LGREEN}--skip-frames{CLIColors.RESET}   视频跳帧数 (默认: 2)
+  {CLIColors.LGREEN}--min-neighbors{CLIColors.RESET} 检测灵敏度 1~10 (默认: 3)
+  {CLIColors.LGREEN}--rebuild{CLOLors.RESET}         强制重建特征库
+
+{CLIColors.TITLE}示例:{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --output out.mp4{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --camera --threshold 0.6{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 图片.jpg --output annotated.jpg{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --db-name 永雏塔菲{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode gui{CLIColors.RESET}
+""")
+
+
+def _parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        prog="MoeFace",
+        description="MoeFace 动漫人脸识别系统",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="示例: python recognize.py --mode cli --source video.mp4 --output out.mp4"
+    )
+
+    parser.add_argument(
+        "--mode", "-m",
+        choices=["gui", "cli"],
+        default="gui",
+        help="运行模式: gui=图形界面(默认), cli=终端界面"
+    )
+
+    # 文件/流输入
+    parser.add_argument(
+        "--source", "-s",
+        help="视频或图片文件路径（支持 JPG/PNG/MP4/AVI/MKV 等）"
+    )
+    parser.add_argument(
+        "--camera", "-c",
+        action="store_true",
+        help="启用摄像头模式"
+    )
+    parser.add_argument(
+        "--camera-id",
+        type=int,
+        default=0,
+        help="摄像头设备 ID（默认: 0）"
+    )
+
+    # 输出
+    parser.add_argument(
+        "--output", "-o",
+        help="输出视频/图片路径（默认: 仅预览）"
+    )
+    parser.add_argument(
+        "--db-name",
+        default=DEFAULT_DB_NAME,
+        help="特征库名称（默认: 全部特征库）"
+    )
+
+    # 识别参数
+    parser.add_argument(
+        "--threshold", "-t",
+        type=float,
+        default=0.45,
+        help="识别阈值，越高越严格（默认: 0.45）"
+    )
+    parser.add_argument(
+        "--skip-frames", "-k",
+        type=int,
+        default=2,
+        help="视频跳帧数，越大处理越快（默认: 2）"
+    )
+    parser.add_argument(
+        "--min-neighbors",
+        type=int,
+        default=3,
+        help="人脸检测灵敏度，越大误检越少（默认: 3）"
+    )
+    parser.add_argument(
+        "--rebuild", "-r",
+        action="store_true",
+        help="强制重建特征库"
+    )
+    parser.add_argument(
+        "--list", "-l",
+        action="store_true",
+        help="列出所有可用特征库"
+    )
+
+    return parser.parse_args()
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app = MoeFaceApp()
-    app.run()
+    args = _parse_args()
+
+    # 列出特征库
+    if args.list:
+        print(f"\n{CLIColors.TITLE}可用特征库:{CLIColors.RESET}")
+        db_names = sorted({e["db_name"] for e in ALIAS_MAP})
+        print(f"  {CLIColors.GREEN}{DEFAULT_DB_NAME}{CLIColors.RESET}（默认）")
+        for name in db_names:
+            print(f"  {CLIColors.CYAN}{name}{CLIColors.RESET}")
+        print("")
+        sys.exit(0)
+
+    # 启动对应模式
+    if args.mode == "gui":
+        app = MoeFaceApp()
+        app.run()
+    else:
+        cli_args = {
+            "source":       args.source,
+            "output":       args.output,
+            "db_name":      args.db_name,
+            "threshold":    args.threshold,
+            "skip_frames":  args.skip_frames,
+            "min_neighbors": args.min_neighbors,
+            "rebuild":      args.rebuild,
+            "camera":       args.camera,
+            "camera_id":    args.camera_id,
+        }
+        cli = MoeFaceCLI(cli_args)
+        try:
+            cli.run()
+        except KeyboardInterrupt:
+            CLIColors.p(f"\n{CLIColors.WARNING}⏹ 已中断{CLIColors.RESET}")
+            cli.stop_evt.set()
+            sys.exit(0)
