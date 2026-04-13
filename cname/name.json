@@ -117,7 +117,7 @@
   },
   {
     "db_name": "奶龙",
-    "aliases": ["nailong", "奶龙",]
+    "aliases": ["nailong", "奶龙"]
   },
   {
     "db_name": "禁漫娘",
@@ -130,5 +130,5 @@
   {
     "db_name": "重音teto",
     "aliases": ["红色钻头","TETO","teto"]
-  },
+  }
 ]
