@@ -157,6 +157,11 @@ def _ensure_models(log_fn=print):
 def extract_features_from_image(image_path: str, log_fn=print):
     import cv2, torch
     import numpy as np
+    
+    # 每个线程加载自己的 CascadeClassifier（线程安全）
+    cascade_path = Path(__file__).parent / "lbpcascade_animeface.xml"
+    cascade = cv2.CascadeClassifier(str(cascade_path))
+    
     try:
         with open(image_path, "rb") as f:
             data = np.frombuffer(f.read(), dtype=np.uint8)
@@ -166,8 +171,16 @@ def extract_features_from_image(image_path: str, log_fn=print):
     except Exception:
         return None
 
+    # 限制最大分辨率，防止内存溢出
+    MAX_DIM = 4096
+    h, w = img.shape[:2]
+    if max(h, w) > MAX_DIM:
+        scale = MAX_DIM / max(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
     gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = _anime_cascade.detectMultiScale(
+    faces = cascade.detectMultiScale(
         gray, scaleFactor=1.02, minNeighbors=3,
         minSize=(20, 20), maxSize=(800, 800)
     )
@@ -186,8 +199,20 @@ def extract_features_from_image(image_path: str, log_fn=print):
     return emb
 
 
-def build_database(data_root: Path, log_fn=print):
+def build_database(data_root: Path, log_fn=print, progress_fn=None):
+    """
+    构建特征库，支持进度回调和多线程加速。
+    
+    progress_fn(current, total, elapsed_sec, db_name) -> None
+        current: 已处理图片数
+        total: 总图片数
+        elapsed_sec: 已耗时（秒）
+        db_name: 当前角色名
+    """
     import numpy as np
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
+    
     database = {}
     if not data_root.exists():
         log_fn(f"❌呜呜呜,主人,路径不存在喵～(｡•́︿•̀｡): {data_root}")
@@ -203,44 +228,92 @@ def build_database(data_root: Path, log_fn=print):
             files += list(folder.glob(f"*{ext.upper()}"))
         return files
 
-    def _process_person(person_dir: Path):
-        imgs = _gather(person_dir)
-        if not imgs:
-            return None
-        embs = []
-        for i, p in enumerate(imgs):
-            log_fn(f"  [{i+1}/{len(imgs)}] {p.name}")
-            e = extract_features_from_image(str(p), log_fn)
-            if e is not None:
-                embs.append(e)
-        if embs:
-            return np.mean(embs, axis=0)
-        return None
-
+    def _extract_single(img_path):
+        """提取单张图片特征，用于多线程"""
+        e = extract_features_from_image(str(img_path), lambda *_: None)
+        return (str(img_path), e)
+    
+    # 统计总图片数和总角色数（每角色最多50张）
+    MAX_PER_PERSON = 50
+    total_images = 0
+    person_images = {}  # {person_name: [img_paths]}
+    
     if subdirs:
-        log_fn(f"多角色模式，共 {len(subdirs)} 个子文件夹")
         for person_dir in subdirs:
-            log_fn(f"\n处理角色: {person_dir.name}")
-            avg = _process_person(person_dir)
-            if avg is not None:
-                database[person_dir.name] = avg
-                log_fn(f"  ✅ {person_dir.name}")
-            else:
-                log_fn(f"  ⚠️  无有效人脸喵～(｡•́︿•̀｡)")
+            imgs = _gather(person_dir)
+            if imgs:
+                person_images[person_dir.name] = imgs[:MAX_PER_PERSON]
+                total_images += min(len(imgs), MAX_PER_PERSON)
     else:
         imgs = _gather(data_root)
+        if imgs:
+            person_images[data_root.name] = imgs[:MAX_PER_PERSON]
+            total_images = min(len(imgs), MAX_PER_PERSON)
+    
+    log_fn(f"多角色模式，共 {len(person_images)} 个角色，{total_images} 张图片")
+    
+    # 多线程配置：限制为 2 线程，避免内存爆炸
+    import os as _os
+    max_workers = min(2, total_images)
+    
+    start_time = time.time()
+    processed = [0]  # 用列表包装以便在闭包中修改
+    
+    def _process_person(person_dir: Path):
+        import gc
+        imgs = person_images[person_dir.name][:50]  # 每角色最多50张，避免内存爆炸
         if not imgs:
-            log_fn(f"⚠️  {data_root} 下没有图片")
-            return database
-        log_fn(f"单角色模式: {data_root.name}")
-        avg = _process_person(data_root)
-        if avg is not None:
-            database[data_root.name] = avg
+            return None
+        
+        # 进度回调：角色开始
+        if progress_fn:
+            progress_fn(processed[0], total_images, time.time() - start_time, person_dir.name)
+        
+        all_embs = []
+        for i, p in enumerate(imgs):
+            e = extract_features_from_image(str(p), lambda *_: None)
+            if e is not None:
+                all_embs.append(e)
+            processed[0] += 1
+            
+            # 每处理 5 张图更新一次进度
+            if progress_fn and (i + 1) % 5 == 0:
+                progress_fn(processed[0], total_images, time.time() - start_time, person_dir.name)
+        
+        # 强制垃圾回收，释放内存
+        gc.collect()
+        
+        if all_embs:
+            return (person_dir.name, np.mean(all_embs, axis=0))
+        return None
+    
+    # 多线程处理各角色
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_process_person, d): d for d in 
+                   [Path(data_root / name) for name in person_images.keys()]}
+        
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                name, avg = result
+                database[name] = avg
+                log_fn(f"  ✅ {name} 完成")
+            else:
+                person_name = futures[future].name
+                log_fn(f"  ⚠️  {person_name} 无有效人脸喵～(｡•́︿•̀｡)")
+            
+            # 角色完成时更新进度
+            if progress_fn:
+                progress_fn(processed[0], total_images, time.time() - start_time, "")
 
+    # 最终进度 100%
+    if progress_fn:
+        progress_fn(total_images, total_images, time.time() - start_time, "")
+    
     return database
 
 
-def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print):
+def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None):
     if not force_rebuild:
         db = load_database_from_json(db_name)
         if db is not None:
@@ -249,14 +322,14 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print):
 
     if db_name == DEFAULT_DB_NAME:
         log_fn("构建全部特征库喵...")
-        db = build_database(DATA_DIR, log_fn)
+        db = build_database(DATA_DIR, log_fn, progress_fn)
     else:
         db_path = DATA_DIR / db_name
         if not db_path.exists():
             log_fn(f"❌ 文件夹不存在: {db_path}")
             return {}
         log_fn(f"构建特征库喵~: {db_name}")
-        db = build_database(db_path, log_fn)
+        db = build_database(db_path, log_fn, progress_fn)
 
     if db:
         save_database_to_json(db, db_name)
@@ -561,6 +634,20 @@ class MoeFaceApp:
                          foreground="#cdd6f4", bordercolor="#7c3aed",
                          arrowcolor="#cdd6f4")
 
+        # — 进度条框架 —
+        self._progress_frame = tk.Frame(parent, bg=PANEL)
+        self._progress_frame.pack(fill="x", padx=10, pady=(4, 2))
+        self._progress_label = self._lbl(self._progress_frame, 
+                                          "等待加载特征库...", PANEL, MUTED,
+                                          font=("微软雅黑", 8))
+        self._progress_label.pack(anchor="w")
+        self._progress_bar = ttk.Progressbar(self._progress_frame, 
+                                              length=200, mode="determinate",
+                                              style="Moe.Horizontal.TProgressbar")
+        self._progress_bar.pack(fill="x", pady=2)
+        self._progress_bar["maximum"] = 100
+        self._progress_bar["value"] = 0
+        
         # — 重建特征库按钮 —
         self._btn(parent, " 重建特征库", self._rebuild_db,
                   ACCENT).pack(fill="x", padx=10, pady=(4, 2))
@@ -743,27 +830,79 @@ class MoeFaceApp:
         self.root.after(0, _upd)
 
     # ── 特征库操作 ────────────────────────────────────────────────────────
+    def _progress_update(self, current: int, total: int, elapsed: float, db_name: str):
+        """进度回调：更新进度条和剩余时间"""
+        if total <= 0:
+            return
+        
+        pct = min(current / total * 100, 100)
+        # 估算剩余时间
+        if current > 0 and current < total:
+            eta_sec = (elapsed / current) * (total - current)
+            if eta_sec >= 60:
+                eta_str = f"约 {int(eta_sec // 60)} 分 {int(eta_sec % 60)} 秒"
+            else:
+                eta_str = f"约 {int(eta_sec)} 秒"
+        else:
+            eta_str = "即将完成"
+        
+        name_str = f" [{db_name}]" if db_name else ""
+        text = f"构建中{name_str} {current}/{total} ({pct:.0f}%) 剩余: {eta_str}"
+        
+        def _upd():
+            self._progress_bar["value"] = pct
+            self._progress_label.config(text=text)
+        self.root.after(0, _upd)
+
     def _load_db_now(self):
         db_name = self._db_var.get()
         self._log(f"加载特征库: {db_name}")
+        
+        # 重置进度条
+        def _reset():
+            self._progress_bar["value"] = 0
+            self._progress_label.config(text="准备加载...")
+        self.root.after(0, _reset)
+        
         def _run():
-            db = get_or_build_database(db_name, force_rebuild=False, log_fn=self._log)
+            db = get_or_build_database(db_name, force_rebuild=False, 
+                                       log_fn=self._log, progress_fn=self._progress_update)
             self._database = db
             self._db_name  = db_name
             cnt = len(db)
             self._log(f"特征库就绪: {cnt} 个角色")
             self._set_status(f"✅ 特征库已加载（{cnt} 角色）")
+            
+            # 完成时重置进度条
+            def _done():
+                self._progress_bar["value"] = 100
+                self._progress_label.config(text=f"完成！共 {cnt} 个角色")
+            self.root.after(0, _done)
         threading.Thread(target=_run, daemon=True).start()
 
     def _rebuild_db(self):
         db_name = self._db_var.get()
         self._log(f" 强制重建: {db_name}")
+        
+        # 重置进度条
+        def _reset():
+            self._progress_bar["value"] = 0
+            self._progress_label.config(text="准备重建...")
+        self.root.after(0, _reset)
+        
         def _run():
-            db = get_or_build_database(db_name, force_rebuild=True, log_fn=self._log)
+            db = get_or_build_database(db_name, force_rebuild=True, 
+                                       log_fn=self._log, progress_fn=self._progress_update)
             self._database = db
             self._db_name  = db_name
             self._log(f"✅ 重建完成: {len(db)} 个角色")
             self._set_status(f"✅ 特征库已重建（{len(db)} 角色）")
+            
+            # 完成时重置进度条
+            def _done():
+                self._progress_bar["value"] = 100
+                self._progress_label.config(text=f"完成！共 {len(db)} 个角色")
+            self.root.after(0, _done)
         threading.Thread(target=_run, daemon=True).start()
 
     # ── 文件处理 ─────────────────────────────────────────────────────────
@@ -1004,21 +1143,24 @@ class CLIColors:
         bg = bg_color or CLIColors.PROGRESS_BG
         return f"{fg}{CLIColors.BOLD}{bar}{CLIColors.RESET} {fg}{percent_str}{CLIColors.RESET}"
 
-
+#═══════════════════
+    #                   ║
 class MoeFaceCLI:
     """CLI 模式主类"""
 
     BANNER = rf"""{CLIColors.TITLE}
-    ╔═══════════════════════════════════════════════════╗
-    ║                                                   ║
-    ║   ███╗   ██╗███████╗██╗  ██╗██╗   ██╗            ║
-    ║   ████╗  ██║██╔════╝╚██╗██╔╝██║   ██║            ║
-    ║   ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║            ║
-    ║   ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║            ║
-    ║   ██║ ╚████║███████╗██╔╝ ╚██╗╚██████╔╝            ║
-    ║   ╚═╝  ╚═══╝╚══════╝╚═╝   ╚═╝ ╚═════╝             ║
-    ║              Face Recognition System               ║
-    ╚═══════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════╗
+║                                                  ║
+║   ███╗   ███╗  ██████╗ ███████╗                  ║
+║   ████╗ ████║ ██╔═══██╗██╔════╝                  ║
+║   ██╔████╔██║ ██║   ██║█████╗                    ║
+║   ██║╚██╔╝██║ ██║   ██║██╔══╝                    ║
+║   ██║ ╚═╝ ██║ ╚██████╔╝███████╗                  ║
+║   ╚═╝     ╚═╝  ╚═════╝ ╚══════╝                  ║
+║                                                  ║
+║            Face Recognition System               ║
+║                                                  ║
+╚══════════════════════════════════════════════════╝
     {CLIColors.RESET}"""
 
     def __init__(self, args):
@@ -1047,14 +1189,20 @@ class MoeFaceCLI:
         CLIColors.p(f"\n{CLIColors.HEADER}{'─' * 50}{CLIColors.RESET}", end="")
         CLIColors.p(f"{CLIColors.HEADER} {title}{CLIColors.RESET}")
 
-    def _progress(self, current: int, total: int, label: str = ""):
+    def _progress(self, current: int, total: int, elapsed: float = 0, label: str = ""):
         """更新进度条（同一行覆盖）"""
         if total <= 0:
             return
         pct = min(current / total, 1.0)
-        bar = CLIColors.progress_bar(pct, width=36)
+        bar = CLIColors.progress_bar(pct, width=28)
         label_text = f" {label}" if label else ""
-        line = f"\r  {bar}{label_text}"
+        # 估算剩余时间
+        if elapsed > 0 and current > 0:
+            eta = elapsed * (total - current) / current
+            eta_text = f" 剩余: {int(eta // 60)}分{int(eta % 60)}秒"
+        else:
+            eta_text = ""
+        line = f"\r  {bar}{label_text}{eta_text}"
         CLIColors.clear_line()
         print(line, end="", flush=True)
         self._last_pct = pct
@@ -1084,8 +1232,11 @@ class MoeFaceCLI:
         db_name = self.args.get("db_name") or DEFAULT_DB_NAME
         CLIColors.p(f"  特征库: {CLIColors.INFO}{db_name}{CLIColors.RESET}")
         force_rebuild = self.args.get("rebuild", False)
-        self.db = get_or_build_database(db_name, force_rebuild=force_rebuild,
-                                        log_fn=lambda m: None)
+        self.db = get_or_build_database(
+            db_name, force_rebuild=force_rebuild,
+            log_fn=self._log,
+            progress_fn=lambda cur, tot, elapsed=0, lbl="": self._progress(cur, tot, elapsed, lbl)
+        )
         if not self.db:
             self._log("特征库为空，请检查 ./data 文件夹或添加角色图片", "error")
             sys.exit(1)

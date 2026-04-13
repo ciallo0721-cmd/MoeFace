@@ -49,7 +49,7 @@ MoeFace/
 - 💾 **特征库缓存**：特征库自动保存为JSON，避免重复计算
 
 ## 示例
-[taffy.mp4](https://github.com/ciallo0721-cmd/MoeFace/releases/download/moeface/taffy.mp4)
+[taffy.mp4](91vip.xn--32v.ink/moeface/2026年4月13日.mp4)
 
 ## 环境要求 <a name="环境要求"></a>
 - Python 3.7+
@@ -184,8 +184,10 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
    - 建议爬取后手动检查图片质量
 
 5. **Bug**
-   - 动漫人脸检测分类器（lbpcascade_animeface.xml）存在误识别情况，可能将角色的衣物、装饰等非人脸区域错误识别为人脸
-   - 该问题在识别 “永雏塔菲” 角色时表现尤为明显，具体可参考以下示例截图：
+   - 动漫人脸检测分类器（`lbpcascade_animeface.xml`）存在误识别情况，可能将角色的衣物、装饰等非人脸区域错误识别为人脸。
+   - 该问题在识别 “永雏塔菲” 角色时表现尤为明显，具体可参考以下示例截图及视频：
+
+   **示例截图**  
    ![image](./demo/1.png)
    ![image](./demo/2.png)
    ![image](./demo/3.png)
@@ -193,6 +195,9 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
    ![image](./demo/5.png)
    ![image](./demo/6.png)
    ![image](./demo/7.png)
+
+   **示例视频**  
+   [2026-04-13 20-23-15.mp4](91vip.xn--32v.ink/moeface/2026-04-13%2020-23-15.mp4)
 
 ## 自定义配置 <a name="自定义配置"></a>
 
