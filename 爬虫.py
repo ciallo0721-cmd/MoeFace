@@ -36,8 +36,27 @@ if not os.path.exists(ROOT_DIR):
     print(f"错误：找不到目录 {ROOT_DIR}")
     exit(1)
 
-# 获取所有角色文件夹
-roles = [d for d in os.listdir(ROOT_DIR) if os.path.isdir(os.path.join(ROOT_DIR, d))]
+# 获取所有角色文件夹（遍历子分类下的子文件夹）
+def get_all_roles(root_dir):
+    """递归获取所有角色文件夹路径，避免重复"""
+    seen = set()  # 用于去重（同名角色）
+    roles = []
+    for category in os.listdir(root_dir):
+        category_path = os.path.join(root_dir, category)
+        if not os.path.isdir(category_path):
+            continue
+        for role in os.listdir(category_path):
+            role_path = os.path.join(category_path, role)
+            if not os.path.isdir(role_path):
+                continue
+            # 用相对路径作为唯一标识，避免同名角色冲突
+            rel_path = os.path.join(category, role)
+            if rel_path not in seen:
+                seen.add(rel_path)
+                roles.append(rel_path)
+    return roles
+
+roles = get_all_roles(ROOT_DIR)
 
 # 角色特定的搜索后缀（用于扩充关键词）
 ROLE_SUFFIXES = {
@@ -292,17 +311,20 @@ for role in roles:
     print(f"\n{'='*40}\n处理角色: {role}")
     target_dir = os.path.join(ROOT_DIR, role)
     os.makedirs(target_dir, exist_ok=True)
+    
+    # 提取纯角色名用于搜索关键词匹配（取最后一级目录名）
+    pure_role_name = os.path.basename(role)
 
     # 统计现有图片
     existing = [f for f in os.listdir(target_dir) if f.lower().endswith(('.jpg','.jpeg','.png','.gif','.webp'))]
     base_index = len(existing)
     print(f"  已有 {base_index} 张")
 
-    # 获取该角色的后缀列表
-    suffixes = ROLE_SUFFIXES.get(role, ["立绘","壁纸","art","fanart","illustration"])
+    # 获取该角色的后缀列表（用纯角色名匹配）
+    suffixes = ROLE_SUFFIXES.get(pure_role_name, ["立绘","壁纸","art","fanart","illustration"])
 
-    # 从多个图源收集URL
-    urls = collect_urls_from_sources(role, MAX_IMAGES_PER_ROLE, suffixes)
+    # 从多个图源收集URL（搜索时用纯角色名）
+    urls = collect_urls_from_sources(pure_role_name, MAX_IMAGES_PER_ROLE, suffixes)
     print(f"共获取到 {len(urls)} 个有效URL")
 
     if not urls:
@@ -313,7 +335,7 @@ for role in roles:
     with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as executor:
         future_to_idx = {}
         for idx, img_url in enumerate(urls):
-            base_name = f"{role}_{base_index + idx}"
+            base_name = f"{pure_role_name}_{base_index + idx}"
             future = executor.submit(download_image, img_url, target_dir, base_name)
             future_to_idx[future] = (idx, img_url, base_name)
 
