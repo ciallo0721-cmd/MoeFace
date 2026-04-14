@@ -51,6 +51,35 @@ try:
 except ImportError:
     DND_AVAILABLE = False
 
+# ── 角色文件夹扫描 ────────────────────────────────────────────────────────
+def scan_role_folders(data_root: Path = DATA_DIR):
+    """
+    扫描 data 目录，返回所有角色名称列表。
+    支持新旧两种目录结构：
+    - 旧：data/角色名/*
+    - 新：data/游戏名/角色名/*
+    """
+    roles = []
+    if not data_root.exists():
+        return roles
+
+    for game_dir in data_root.iterdir():
+        if not game_dir.is_dir():
+            continue
+
+        # 新结构：游戏名/角色名 两层
+        subdirs = [d for d in game_dir.iterdir() if d.is_dir()]
+        if subdirs and any(d.is_dir() for d in game_dir.iterdir()):
+            # 是游戏文件夹，里面有角色子文件夹
+            for role_dir in subdirs:
+                roles.append(f"{game_dir.name}/{role_dir.name}")
+        else:
+            # 旧结构或扁平结构
+            roles.append(game_dir.name)
+
+    return sorted(roles)
+
+
 # ── 别名模块：从 cname/name.json 加载 ─────────────────────────────────────
 def load_alias_map(path: Path = CNAME_PATH):
     """
@@ -82,8 +111,8 @@ def get_db_name_from_filename(filename: str) -> str:
 
 # ── JSON 特征库管理 ────────────────────────────────────────────────────────
 def _safe_json_name(name: str) -> str:
-    """生成安全文件名（保留汉字、字母、数字、常用符号）"""
-    keep = set("._- ·•")
+    """生成安全文件名（保留汉字、字母、数字、常用符号，含斜杠用于游戏/角色路径）"""
+    keep = set("._- ·•/")
     return "".join(c for c in name if c.isalnum() or c in keep or "\u4e00" <= c <= "\u9fff")
 
 def save_database_to_json(database: dict, json_name: str):
@@ -159,8 +188,8 @@ def extract_features_from_image(image_path: str, log_fn=print):
     import numpy as np
     
     # 每个线程加载自己的 CascadeClassifier（线程安全）
-    cascade_path = Path(__file__).parent / "lbpcascade_animeface.xml"
-    cascade = cv2.CascadeClassifier(str(cascade_path))
+    # 使用模块顶部定义的 CASCADE_PATH，兼容 PyInstaller 打包
+    cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
     
     try:
         with open(image_path, "rb") as f:
@@ -202,7 +231,10 @@ def extract_features_from_image(image_path: str, log_fn=print):
 def build_database(data_root: Path, log_fn=print, progress_fn=None):
     """
     构建特征库，支持进度回调和多线程加速。
-    
+
+    新目录结构：游戏名称/角色名称/*.jpg
+    旧目录结构：角色名称/*.jpg（兼容）
+
     progress_fn(current, total, elapsed_sec, db_name) -> None
         current: 已处理图片数
         total: 总图片数
@@ -212,14 +244,13 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
     import numpy as np
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time
-    
+
     database = {}
     if not data_root.exists():
         log_fn(f"❌呜呜呜,主人,路径不存在喵～(｡•́︿•̀｡): {data_root}")
         return database
 
-    subdirs = [d for d in data_root.iterdir() if d.is_dir()]
-    exts    = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
     def _gather(folder):
         files = []
@@ -232,66 +263,87 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
         """提取单张图片特征，用于多线程"""
         e = extract_features_from_image(str(img_path), lambda *_: None)
         return (str(img_path), e)
-    
+
     # 统计总图片数和总角色数（每角色最多50张）
     MAX_PER_PERSON = 50
     total_images = 0
     person_images = {}  # {person_name: [img_paths]}
-    
+
+    # 遍历 data_root 下的子目录
+    subdirs = [d for d in data_root.iterdir() if d.is_dir()]
+
     if subdirs:
-        for person_dir in subdirs:
-            imgs = _gather(person_dir)
-            if imgs:
-                person_images[person_dir.name] = imgs[:MAX_PER_PERSON]
-                total_images += min(len(imgs), MAX_PER_PERSON)
+        # 新结构：游戏/角色 两层
+        game_dirs = [d for d in subdirs if any(e.is_dir() for e in d.iterdir())]
+        # 如果有游戏子文件夹，使用新结构
+        if game_dirs:
+            for game_dir in game_dirs:
+                for role_dir in game_dir.iterdir():
+                    if role_dir.is_dir():
+                        imgs = _gather(role_dir)
+                        if imgs:
+                            # 使用 "游戏名/角色名" 作为特征库中的唯一标识
+                            key = f"{game_dir.name}/{role_dir.name}"
+                            person_images[key] = imgs[:MAX_PER_PERSON]
+                            total_images += min(len(imgs), MAX_PER_PERSON)
+        else:
+            # 旧结构：扁平目录，直接是角色名
+            for person_dir in subdirs:
+                imgs = _gather(person_dir)
+                if imgs:
+                    person_images[person_dir.name] = imgs[:MAX_PER_PERSON]
+                    total_images += min(len(imgs), MAX_PER_PERSON)
     else:
+        # data_root 直接包含图片（空游戏文件夹情况）
         imgs = _gather(data_root)
         if imgs:
             person_images[data_root.name] = imgs[:MAX_PER_PERSON]
             total_images = min(len(imgs), MAX_PER_PERSON)
-    
+
     log_fn(f"多角色模式，共 {len(person_images)} 个角色，{total_images} 张图片")
-    
+
     # 多线程配置：限制为 2 线程，避免内存爆炸
     import os as _os
     max_workers = min(2, total_images)
-    
+
     start_time = time.time()
     processed = [0]  # 用列表包装以便在闭包中修改
-    
-    def _process_person(person_dir: Path):
+
+    def _process_person(person_name: str):
         import gc
-        imgs = person_images[person_dir.name][:50]  # 每角色最多50张，避免内存爆炸
+        imgs = person_images[person_name][:50]  # 每角色最多50张，避免内存爆炸
         if not imgs:
             return None
-        
+
         # 进度回调：角色开始
         if progress_fn:
-            progress_fn(processed[0], total_images, time.time() - start_time, person_dir.name)
-        
+            progress_fn(processed[0], total_images, time.time() - start_time, person_name)
+
         all_embs = []
         for i, p in enumerate(imgs):
             e = extract_features_from_image(str(p), lambda *_: None)
             if e is not None:
                 all_embs.append(e)
             processed[0] += 1
-            
+
             # 每处理 5 张图更新一次进度
             if progress_fn and (i + 1) % 5 == 0:
-                progress_fn(processed[0], total_images, time.time() - start_time, person_dir.name)
-        
+                progress_fn(processed[0], total_images, time.time() - start_time, person_name)
+
         # 强制垃圾回收，释放内存
         gc.collect()
-        
+
         if all_embs:
-            return (person_dir.name, np.mean(all_embs, axis=0))
+            return (person_name, np.mean(all_embs, axis=0))
         return None
-    
+
     # 多线程处理各角色
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_process_person, d): d for d in 
-                   [Path(data_root / name) for name in person_images.keys()]}
-        
+        futures = {
+            executor.submit(_process_person, name): name
+            for name in person_images.keys()
+        }
+
         for future in as_completed(futures):
             result = future.result()
             if result is not None:
@@ -299,9 +351,9 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
                 database[name] = avg
                 log_fn(f"  ✅ {name} 完成")
             else:
-                person_name = futures[future].name
+                person_name = futures[future]
                 log_fn(f"  ⚠️  {person_name} 无有效人脸喵～(｡•́︿•̀｡)")
-            
+
             # 角色完成时更新进度
             if progress_fn:
                 progress_fn(processed[0], total_images, time.time() - start_time, "")
@@ -309,8 +361,37 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
     # 最终进度 100%
     if progress_fn:
         progress_fn(total_images, total_images, time.time() - start_time, "")
-    
+
     return database
+
+
+def _find_role_path(db_name: str) -> Path:
+    """
+    根据角色名找到对应的路径。
+    新结构：游戏/角色
+    返回角色文件夹的路径，如果找不到返回 None
+    """
+    if not DATA_DIR.exists():
+        return None
+
+    # 先尝试旧结构：直接是角色名
+    old_path = DATA_DIR / db_name
+    if old_path.exists() and old_path.is_dir():
+        return old_path
+
+    # 新结构：遍历游戏文件夹找角色
+    for game_dir in DATA_DIR.iterdir():
+        if game_dir.is_dir():
+            role_path = game_dir / db_name
+            if role_path.exists() and role_path.is_dir():
+                return role_path
+            # 也支持 "游戏/角色" 格式的 db_name
+            if "/" in db_name:
+                parts = db_name.split("/", 1)
+                if game_dir.name == parts[0] and (game_dir / parts[1]).exists():
+                    return game_dir / parts[1]
+
+    return None
 
 
 def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None):
@@ -324,10 +405,14 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
         log_fn("构建全部特征库喵...")
         db = build_database(DATA_DIR, log_fn, progress_fn)
     else:
-        db_path = DATA_DIR / db_name
-        if not db_path.exists():
-            log_fn(f"❌ 文件夹不存在: {db_path}")
-            return {}
+        # 尝试找角色对应的路径
+        db_path = _find_role_path(db_name)
+        if db_path is None:
+            # 尝试直接作为游戏名或角色名
+            db_path = DATA_DIR / db_name
+            if not db_path.exists():
+                log_fn(f"❌ 文件夹不存在: {db_path}")
+                return {}
         log_fn(f"构建特征库喵~: {db_name}")
         db = build_database(db_path, log_fn, progress_fn)
 
@@ -620,9 +705,7 @@ class MoeFaceApp:
         db_frame.pack(fill="x", padx=10, pady=2)
 
         self._db_var = tk.StringVar(value=DEFAULT_DB_NAME)
-        db_names = [DEFAULT_DB_NAME] + sorted(
-            {e["db_name"] for e in ALIAS_MAP}
-        )
+        db_names = [DEFAULT_DB_NAME] + sorted(scan_role_folders())
         self._db_combo = ttk.Combobox(db_frame, textvariable=self._db_var,
                                       values=db_names, state="readonly", width=20)
         self._db_combo.pack(side="left", fill="x", expand=True)
@@ -1607,7 +1690,7 @@ if __name__ == "__main__":
     # 列出特征库
     if args.list:
         print(f"\n{CLIColors.TITLE}可用特征库:{CLIColors.RESET}")
-        db_names = sorted({e["db_name"] for e in ALIAS_MAP})
+        db_names = sorted(scan_role_folders())
         print(f"  {CLIColors.GREEN}{DEFAULT_DB_NAME}{CLIColors.RESET}（默认）")
         for name in db_names:
             print(f"  {CLIColors.CYAN}{name}{CLIColors.RESET}")

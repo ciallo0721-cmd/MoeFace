@@ -12,12 +12,14 @@
 - [功能特点](#功能特点)
 - [环境要求](#环境要求)
 - [安装步骤](#安装步骤)
+- [示例](#示例)
 - [使用指南](#使用指南)
 - [关键词映射](#关键词映射)
 - [注意事项](#注意事项)
 - [自定义配置](#自定义配置)
 - [故障排除](#故障排除)
 - [免责声明](#免责声明)
+- [更新时间线](#更新时间线)
 
 ---
 
@@ -27,7 +29,7 @@ MoeFace/
 ├── data/               # 角色图片库（每个角色一个文件夹）
 ├── features/           # 特征库JSON文件（自动生成）
 ├── temp/               # 临时文件目录
-├── demo/              #示例图片
+├── demo/               # 示例图片
 ├── 视频示例/           # 示例视频文件
 │   └── taffy.mp4       # 示例视频
 ├── lbpcascade_animeface.xml  # 动漫人脸检测分类器
@@ -48,8 +50,11 @@ MoeFace/
 - ⚡ **高性能**：支持跳帧处理，提升视频处理速度
 - 💾 **特征库缓存**：特征库自动保存为JSON，避免重复计算
 
-## 示例
-[taffy.mp4](91vip.xn--32v.ink/moeface/2026年4月13日.mp4)
+## 示例 <a name="示例"></a>
+
+---
+
+[taffy.mp4](https://91vip.xn--32v.ink/moeface/2026年4月13日.mp4)
 
 ## 环境要求 <a name="环境要求"></a>
 - Python 3.7+
@@ -165,6 +170,7 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
 
 1. **识别精度**：
    - 阈值（threshold）默认0.45，值越高越严格，越低越宽松
+   - **推荐范围**：宽松识别用 `0.35~0.40`，均衡识别用 `0.45`（默认），严格识别用 `0.50~0.60`
    - 建议为每个角色准备至少5张不同角度的图片
    - 图片质量越高，识别效果越好
 
@@ -197,7 +203,7 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
    ![image](./demo/7.png)
 
    **示例视频**  
-   [2026-04-13 20-23-15.mp4](91vip.xn--32v.ink/moeface/2026-04-13%2020-23-15.mp4)
+   [2026-04-13 20-23-15.mp4](https://91vip.xn--32v.ink/moeface/2026-04-13%2020-23-15.mp4)
 
 ## 自定义配置 <a name="自定义配置"></a>
 
@@ -238,15 +244,20 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
    - 安装 tkinterdnd2：`pip install tkinterdnd2`
    - 重启程序后生效
 
-5. **CUDA Out of Memory**：
+6. **CUDA Out of Memory**：
    - 降低批处理大小
    - 使用CPU模式（自动 fallback）
 
-## 许可证
-本项目基于开源许可证发布（详见 LICENSE 文件）
-
 ## 免责声明 <a name="免责声明"></a>
 - **本项目不提供任何受版权保护的图片素材**。`data/` 目录中的图片仅为作者本地测试用途，使用者应自行确认所收集图片的版权归属，并对其使用行为负责
-- 爬虫脚本仅用于学习研究，请遵守目标网站的 robots 协议，勿用于商业用途
+- 爬虫脚本仅用于学习研究，**严禁爬取 pixiv、Twitter/X 等在其 robots.txt 中明确禁止爬取的平台**；请遵守目标网站的服务条款，勿用于商业用途，使用者须自行承担相关法律责任
 - **本工具仅供个人娱乐/学习用途，不得用于未经当事人同意的身份识别、追踪或监控**
 - 本项目基于开源许可证发布（详见 LICENSE 文件）
+
+---
+
+## 更新时间线 <a name="更新时间线"></a>
+
+| 日期 | 版本 | 更新内容 |
+|------|------|----------|
+| 2026-04-12 | v3.0 | 发布 EXE 免安装版本，无需 Python 环境即可直接使用。下载地址：[Moeface.rar](https://github.com/ciallo0721-cmd/MoeFace/releases/download/v3.0/Moeface.rar) |
