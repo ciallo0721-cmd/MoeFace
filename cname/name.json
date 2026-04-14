@@ -130,5 +130,9 @@
   {
     "db_name": "重音teto",
     "aliases": ["红色钻头","TETO","teto"]
+  },
+  {
+    "db_name": "warma",
+    "aliases": ["warma","沃玛","Warma"]
   }
 ]
