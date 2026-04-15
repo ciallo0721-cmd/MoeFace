@@ -1,64 +1,35 @@
 import os
+import sys
 import requests
 import time
 import random
 import urllib.parse
 import json
 import re
+import threading
+import tkinter as tk
+from tkinter import filedialog, scrolledtext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 
 # ======================== 配置区域 ========================
-ROOT_DIR = os.path.join(os.path.dirname(__file__), 'data')
-MAX_IMAGES_PER_ROLE = 10          # 每个角色总共要下载多少张
-DOWNLOAD_THREADS = 5              # 下载并发数
-REQUEST_DELAY = 0.5               # 同一图源内每次请求间隔（秒）
+DOWNLOAD_THREADS = 5
+REQUEST_DELAY = 0.5
+REQUEST_TIMEOUT = (5, 10)          # (连接超时, 读取超时) 单位秒
 
-# 各图源的开关及配置
 ENABLE_BING = True
-ENABLE_GOOGLE = True              # Google 反爬严重，默认关闭，可自行开启测试
+ENABLE_GOOGLE = False
 ENABLE_BAIDU = True
-ENABLE_PIXIV = False               # 如需开启，必须在下方配置 PIXIV_COOKIE
-ENABLE_SAFEBOORU = True            # 稳定图库，无 NSFW 过滤
+ENABLE_PIXIV = False
+ENABLE_SAFEBOORU = True
 
-# Pixiv 配置（从浏览器复制 Cookie 字符串）
-PIXIV_COOKIE = ""                  # 格式: "PHPSESSID=xxxxx; device_token=xxxxx"
-# 如果未填写 Cookie 且 ENABLE_PIXIV=True，会自动跳过 Pixiv
+PIXIV_COOKIE = ""
 
-# 通用请求头
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 }
 
-# 确保根目录存在
-if not os.path.exists(ROOT_DIR):
-    print(f"错误：找不到目录 {ROOT_DIR}")
-    exit(1)
-
-# 获取所有角色文件夹（遍历子分类下的子文件夹）
-def get_all_roles(root_dir):
-    """递归获取所有角色文件夹路径，避免重复"""
-    seen = set()  # 用于去重（同名角色）
-    roles = []
-    for category in os.listdir(root_dir):
-        category_path = os.path.join(root_dir, category)
-        if not os.path.isdir(category_path):
-            continue
-        for role in os.listdir(category_path):
-            role_path = os.path.join(category_path, role)
-            if not os.path.isdir(role_path):
-                continue
-            # 用相对路径作为唯一标识，避免同名角色冲突
-            rel_path = os.path.join(category, role)
-            if rel_path not in seen:
-                seen.add(rel_path)
-                roles.append(rel_path)
-    return roles
-
-roles = get_all_roles(ROOT_DIR)
-
-# 角色特定的搜索后缀（用于扩充关键词）
 ROLE_SUFFIXES = {
     "丛雨": ["立绘","壁纸","千恋万花","Murasame","ムラサメ","丛雨丸"],
     "Neuro-sama": ["vtuber","art","fanart","Neuro sama","Neurosama","AI vtuber"],
@@ -70,19 +41,26 @@ ROLE_SUFFIXES = {
     "Ayachi_Nene": ["立绘","壁纸","綾地寧々","Nene Ayachi","桌角战士"]
 }
 
-# ======================== 各图源获取函数 ========================
+# ======================== 图源函数（增加超时和日志） ========================
+def log(msg):
+    """带时间戳的日志"""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
 def get_bing_images(keyword, num):
-    """Bing 图片搜索"""
+    log(f"Bing 开始搜索: {keyword}")
     urls = []
     start = 1
-    while len(urls) < num:
+    max_pages = 3  # 最多翻3页
+    page = 0
+    while len(urls) < num and page < max_pages:
         search_url = f"https://cn.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={start}"
         try:
-            resp = requests.get(search_url, headers=HEADERS, timeout=10)
+            log(f"  Bing 请求第{page+1}页: {search_url[:80]}...")
+            resp = requests.get(search_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             soup = BeautifulSoup(resp.text, 'html.parser')
             links = soup.find_all('a', class_='iusc')
             if not links:
+                log(f"  Bing 第{page+1}页没有找到链接")
                 break
             for link in links:
                 m = link.get('m')
@@ -96,50 +74,57 @@ def get_bing_images(keyword, num):
                     except:
                         continue
             start += len(links)
+            page += 1
             time.sleep(REQUEST_DELAY)
         except Exception as e:
-            print(f"    [Bing] 解析出错: {e}")
+            log(f"  Bing 出错: {e}")
             break
+    log(f"Bing 结束，获得 {len(urls)} 个URL")
     return urls[:num]
 
 def get_baidu_images(keyword, num):
-    """百度图片搜索"""
+    log(f"百度 开始搜索: {keyword}")
     urls = []
     pn = 0
-    while len(urls) < num:
+    max_pages = 3
+    page = 0
+    while len(urls) < num and page < max_pages:
         search_url = f"https://image.baidu.com/search/flip?tn=baiduimage&ie=utf-8&word={urllib.parse.quote(keyword)}&pn={pn}"
         try:
-            resp = requests.get(search_url, headers=HEADERS, timeout=10)
-            # 百度图片的图片URL藏在页面里的 objURL 中
-            # 简单正则提取
+            log(f"  百度请求第{page+1}页: {search_url[:80]}...")
+            resp = requests.get(search_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             pattern = r'"objURL":"(https?://[^"]+)"'
             matches = re.findall(pattern, resp.text)
             if not matches:
+                log(f"  百度第{page+1}页没有找到图片链接")
                 break
             for url in matches:
-                # 处理反斜杠转义
                 url = url.replace('\\/', '/')
                 if url and url not in urls:
                     urls.append(url)
                     if len(urls) >= num:
                         break
-            pn += 60   # 每页大约60张
+            pn += 60
+            page += 1
             time.sleep(REQUEST_DELAY)
         except Exception as e:
-            print(f"    [百度] 解析出错: {e}")
+            log(f"  百度出错: {e}")
             break
+    log(f"百度结束，获得 {len(urls)} 个URL")
     return urls[:num]
 
 def get_google_images(keyword, num):
-    """Google 图片搜索（反爬严重，成功率低，仅供参考）"""
+    log(f"Google 开始搜索: {keyword}")
     urls = []
     start = 0
-    while len(urls) < num:
+    max_pages = 2
+    page = 0
+    while len(urls) < num and page < max_pages:
         search_url = f"https://www.google.com/search?q={urllib.parse.quote(keyword)}&tbm=isch&start={start}"
         try:
-            resp = requests.get(search_url, headers=HEADERS, timeout=10)
+            log(f"  Google请求第{page+1}页")
+            resp = requests.get(search_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Google 图片的URL通常在 data-src 或 img 标签中
             img_tags = soup.find_all('img')
             for img in img_tags:
                 src = img.get('data-src') or img.get('src')
@@ -150,28 +135,30 @@ def get_google_images(keyword, num):
             if not img_tags:
                 break
             start += 20
+            page += 1
             time.sleep(REQUEST_DELAY + random.uniform(0.5, 1.5))
         except Exception as e:
-            print(f"    [Google] 解析出错: {e}")
+            log(f"  Google出错: {e}")
             break
+    log(f"Google结束，获得 {len(urls)} 个URL")
     return urls[:num]
 
 def get_pixiv_images(keyword, num):
-    """Pixiv 搜索（需要登录 Cookie）"""
     if not PIXIV_COOKIE:
+        log("Pixiv 未配置Cookie，跳过")
         return []
+    log(f"Pixiv 开始搜索: {keyword}")
     urls = []
     headers = HEADERS.copy()
     headers['Cookie'] = PIXIV_COOKIE
     headers['Referer'] = 'https://www.pixiv.net/'
-    # 使用 Pixiv 的 API (非官方)
-    # 注意：Pixiv 需要带 user-agent 和 cookie，否则返回403
     page = 1
-    per_page = 30
-    while len(urls) < num:
+    max_pages = 2
+    while len(urls) < num and page <= max_pages:
         api_url = f"https://www.pixiv.net/ajax/search/artworks/{urllib.parse.quote(keyword)}?word={urllib.parse.quote(keyword)}&order=date_d&mode=all&p={page}"
         try:
-            resp = requests.get(api_url, headers=headers, timeout=10)
+            log(f"  Pixiv请求第{page}页")
+            resp = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
             data = resp.json()
             if data.get('error'):
                 break
@@ -179,12 +166,10 @@ def get_pixiv_images(keyword, num):
             if not works:
                 break
             for work in works:
-                # 获取原图URL
                 illust_id = work.get('id')
                 if illust_id:
-                    # 获取作品详情页获取原图链接
                     detail_url = f"https://www.pixiv.net/ajax/illust/{illust_id}"
-                    detail_resp = requests.get(detail_url, headers=headers, timeout=10)
+                    detail_resp = requests.get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
                     detail_data = detail_resp.json()
                     urls_big = detail_data.get('body', {}).get('urls', {}).get('original')
                     if urls_big and urls_big not in urls:
@@ -194,24 +179,25 @@ def get_pixiv_images(keyword, num):
             page += 1
             time.sleep(REQUEST_DELAY * 2)
         except Exception as e:
-            print(f"    [Pixiv] 出错: {e}")
+            log(f"  Pixiv出错: {e}")
             break
+    log(f"Pixiv结束，获得 {len(urls)} 个URL")
     return urls[:num]
 
 def get_safebooru_images(keyword, num):
-    """Safebooru 稳定图库（无需登录，只返回安全图片）"""
+    log(f"Safebooru 开始搜索: {keyword}")
     urls = []
-    # Safebooru 的 API: https://safebooru.org/index.php?page=dapi&s=post&q=index&tags=xxx
-    # 返回 XML，需要解析
     page = 0
-    limit = 40
-    while len(urls) < num:
-        api_url = f"https://safebooru.org/index.php?page=dapi&s=post&q=index&tags={urllib.parse.quote(keyword)}&pid={page}&limit={limit}"
+    max_pages = 3
+    while len(urls) < num and page < max_pages:
+        api_url = f"https://safebooru.org/index.php?page=dapi&s=post&q=index&tags={urllib.parse.quote(keyword)}&pid={page}&limit=40"
         try:
-            resp = requests.get(api_url, headers=HEADERS, timeout=10)
+            log(f"  Safebooru请求第{page+1}页")
+            resp = requests.get(api_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             soup = BeautifulSoup(resp.text, 'xml')
             posts = soup.find_all('post')
             if not posts:
+                log(f"  Safebooru第{page+1}页没有post")
                 break
             for post in posts:
                 file_url = post.get('file_url')
@@ -222,11 +208,11 @@ def get_safebooru_images(keyword, num):
             page += 1
             time.sleep(REQUEST_DELAY)
         except Exception as e:
-            print(f"    [Safebooru] 出错: {e}")
+            log(f"  Safebooru出错: {e}")
             break
+    log(f"Safebooru结束，获得 {len(urls)} 个URL")
     return urls[:num]
 
-# 所有启用的图源列表（顺序影响合并优先级，靠前的优先使用）
 SOURCE_GETTERS = []
 if ENABLE_BING:
     SOURCE_GETTERS.append(('Bing', get_bing_images))
@@ -240,38 +226,29 @@ if ENABLE_SAFEBOORU:
     SOURCE_GETTERS.append(('Safebooru', get_safebooru_images))
 
 def collect_urls_from_sources(keyword, target_num, suffixes):
-    """从多个图源收集图片URL，直到达到 target_num 或所有源尝试完毕"""
     all_urls = []
-    # 构造关键词列表：原始关键词 + 关键词+后缀
     keywords_to_try = [keyword] + [f"{keyword} {suffix}" for suffix in suffixes]
-    # 记录每个源已经尝试过的关键词索引，避免重复搜索相同关键词（简单起见，按顺序尝试）
     for kw in keywords_to_try:
         if len(all_urls) >= target_num:
             break
-        print(f"  尝试关键词: {kw}")
+        log(f"尝试关键词: {kw}")
         for src_name, getter in SOURCE_GETTERS:
             if len(all_urls) >= target_num:
                 break
-            # 每个关键词从该源获取剩余所需数量
             need = target_num - len(all_urls)
-            # 为防止单个源返回太多重复或无用数据，最多请求 need * 2 个
+            log(f"  使用图源 {src_name} 获取最多 {need*2} 个URL...")
             urls = getter(kw, need * 2) if need > 0 else []
             new_urls = [u for u in urls if u not in all_urls]
             all_urls.extend(new_urls)
-            if new_urls:
-                print(f"    [{src_name}] 获得 {len(new_urls)} 个新URL")
-            # 短暂休息，礼貌爬取
+            log(f"    {src_name} 新增 {len(new_urls)} 个URL，累计 {len(all_urls)}")
             time.sleep(0.2)
     return all_urls[:target_num]
 
-# ======================== 下载函数（与原脚本一致） ========================
 def download_image(url, dir_path, base_name):
-    """下载单张图片，返回是否成功"""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15, stream=True)
+        resp = requests.get(url, headers=HEADERS, timeout=(5, 15), stream=True)
         if resp.status_code != 200:
             return False
-        # 判断扩展名
         content_type = resp.headers.get('content-type', '')
         ext = None
         if 'jpeg' in content_type or 'jpg' in content_type:
@@ -306,48 +283,185 @@ def download_image(url, dir_path, base_name):
     except Exception:
         return False
 
-# ======================== 主程序 ========================
-for role in roles:
-    print(f"\n{'='*40}\n处理角色: {role}")
-    target_dir = os.path.join(ROOT_DIR, role)
-    os.makedirs(target_dir, exist_ok=True)
+def get_roles_from_dir(root_dir):
+    if not os.path.isdir(root_dir):
+        return []
+    items = os.listdir(root_dir)
+    subdirs = [item for item in items if os.path.isdir(os.path.join(root_dir, item))]
+    if subdirs:
+        roles = []
+        for sub in subdirs:
+            role_path = os.path.join(root_dir, sub)
+            roles.append((sub, role_path))
+        return roles
+    image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
+    has_images = any(f.lower().endswith(image_extensions) for f in items if os.path.isfile(os.path.join(root_dir, f)))
+    if has_images:
+        role_name = os.path.basename(root_dir)
+        return [(role_name, root_dir)]
+    return []
+
+def crawl_all_roles(root_dir, max_images_per_role):
+    if not os.path.exists(root_dir):
+        print(f"错误：目录不存在 {root_dir}")
+        return
+    if not os.path.isdir(root_dir):
+        print(f"错误：路径不是目录 {root_dir}")
+        return
     
-    # 提取纯角色名用于搜索关键词匹配（取最后一级目录名）
-    pure_role_name = os.path.basename(role)
+    roles = get_roles_from_dir(root_dir)
+    if not roles:
+        print(f"警告：在 {root_dir} 下没有找到角色文件夹或图片")
+        return
+    
+    print(f"共找到 {len(roles)} 个角色：{', '.join([name for name, _ in roles])}")
+    
+    for role_name, role_path in roles:
+        print(f"\n{'='*40}\n处理角色: {role_name}")
+        target_dir = role_path
+        os.makedirs(target_dir, exist_ok=True)
+        
+        existing = [f for f in os.listdir(target_dir) if f.lower().endswith(('.jpg','.jpeg','.png','.gif','.webp'))]
+        base_index = len(existing)
+        print(f"  已有 {base_index} 张")
+        
+        suffixes = ROLE_SUFFIXES.get(role_name, ["立绘","壁纸","art","fanart","illustration"])
+        print(f"  搜索关键词: {role_name}, 后缀: {suffixes}")
+        urls = collect_urls_from_sources(role_name, max_images_per_role, suffixes)
+        print(f"共获取到 {len(urls)} 个有效URL")
+        
+        if not urls:
+            print("  没有获取到任何URL，跳过下载")
+            continue
+        
+        success = 0
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as executor:
+            future_to_idx = {}
+            for idx, img_url in enumerate(urls):
+                base_name = f"{role_name}_{base_index + idx}"
+                future = executor.submit(download_image, img_url, target_dir, base_name)
+                future_to_idx[future] = (idx, img_url, base_name)
+            
+            for future in as_completed(future_to_idx):
+                idx, img_url, base_name = future_to_idx[future]
+                try:
+                    if future.result():
+                        success += 1
+                        print(f"  ✅ {idx+1}: {base_name}.*")
+                    else:
+                        print(f"  ❌ {idx+1}: 下载失败")
+                except Exception as e:
+                    print(f"  ❌ {idx+1}: 异常 - {e}")
+        
+        print(f"角色 {role_name} 完成，成功 {success} 张")
+    print("\n所有角色处理完毕！")
 
-    # 统计现有图片
-    existing = [f for f in os.listdir(target_dir) if f.lower().endswith(('.jpg','.jpeg','.png','.gif','.webp'))]
-    base_index = len(existing)
-    print(f"  已有 {base_index} 张")
+# ======================== GUI 界面（与原版相同） ========================
+class StdoutRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+    def write(self, msg):
+        self.text_widget.after(0, self._insert, msg)
+    def _insert(self, msg):
+        self.text_widget.insert(tk.END, msg)
+        self.text_widget.see(tk.END)
+        self.text_widget.update_idletasks()
+    def flush(self):
+        pass
 
-    # 获取该角色的后缀列表（用纯角色名匹配）
-    suffixes = ROLE_SUFFIXES.get(pure_role_name, ["立绘","壁纸","art","fanart","illustration"])
+class CrawlerGUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("简陋图片爬虫")
+        self.root.geometry("700x500")
+        self.running = False
+        self.original_stdout = sys.stdout
+        
+        frame_path = tk.Frame(self.root)
+        frame_path.pack(pady=10, padx=10, fill=tk.X)
+        tk.Label(frame_path, text="目标文件夹:").pack(side=tk.LEFT, padx=5)
+        self.path_var = tk.StringVar()
+        self.entry_path = tk.Entry(frame_path, textvariable=self.path_var, width=50)
+        self.entry_path.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        self.btn_browse = tk.Button(frame_path, text="浏览", command=self.browse_folder)
+        self.btn_browse.pack(side=tk.LEFT, padx=5)
+        
+        frame_num = tk.Frame(self.root)
+        frame_num.pack(pady=5, padx=10, fill=tk.X)
+        tk.Label(frame_num, text="每个角色图片数:").pack(side=tk.LEFT, padx=5)
+        self.num_var = tk.StringVar(value="10")
+        self.entry_num = tk.Entry(frame_num, textvariable=self.num_var, width=10)
+        self.entry_num.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_start = tk.Button(self.root, text="开始爬取", command=self.start_crawling, bg="lightgreen")
+        self.btn_start.pack(pady=10)
+        
+        self.log_text = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, height=25)
+        self.log_text.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
+        
+        self.log_text.insert(tk.END, "请选择存放角色图片的根目录。\n")
+        self.log_text.insert(tk.END, "支持两种结构：\n")
+        self.log_text.insert(tk.END, "  1. 根目录下直接包含多个角色文件夹（每个文件夹一个角色）\n")
+        self.log_text.insert(tk.END, "  2. 根目录本身就是某个角色的目录（目录内已有图片）\n")
+        self.log_text.insert(tk.END, "然后点击「开始爬取」\n")
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+    
+    def browse_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.path_var.set(folder)
+    
+    def start_crawling(self):
+        if self.running:
+            self.log_text.insert(tk.END, "爬取任务已在运行中，请稍后...\n")
+            return
+        root_dir = self.path_var.get().strip()
+        if not root_dir:
+            self.log_text.insert(tk.END, "请先选择目标文件夹！\n")
+            return
+        try:
+            max_num = int(self.num_var.get())
+            if max_num <= 0:
+                raise ValueError
+        except ValueError:
+            self.log_text.insert(tk.END, "图片数量必须是正整数！\n")
+            return
+        
+        self.running = True
+        self.btn_start.config(state=tk.DISABLED, text="爬取中...")
+        self.log_text.insert(tk.END, f"开始爬取，根目录：{root_dir}，每个角色最多 {max_num} 张\n")
+        self.log_text.see(tk.END)
+        
+        thread = threading.Thread(target=self._run_crawler, args=(root_dir, max_num))
+        thread.daemon = True
+        thread.start()
+    
+    def _run_crawler(self, root_dir, max_num):
+        sys.stdout = StdoutRedirector(self.log_text)
+        try:
+            crawl_all_roles(root_dir, max_num)
+        except Exception as e:
+            print(f"爬取过程中发生异常: {e}")
+        finally:
+            sys.stdout = self.original_stdout
+            self.root.after(0, self._crawl_finished)
+    
+    def _crawl_finished(self):
+        self.running = False
+        self.btn_start.config(state=tk.NORMAL, text="开始爬取")
+        self.log_text.insert(tk.END, "\n爬取任务结束。\n")
+        self.log_text.see(tk.END)
+    
+    def on_close(self):
+        if self.running:
+            self.log_text.insert(tk.END, "正在爬取中，请等待完成后再关闭...\n")
+            return
+        self.root.destroy()
+    
+    def run(self):
+        self.root.mainloop()
 
-    # 从多个图源收集URL（搜索时用纯角色名）
-    urls = collect_urls_from_sources(pure_role_name, MAX_IMAGES_PER_ROLE, suffixes)
-    print(f"共获取到 {len(urls)} 个有效URL")
-
-    if not urls:
-        continue
-
-    # 多线程下载
-    success = 0
-    with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as executor:
-        future_to_idx = {}
-        for idx, img_url in enumerate(urls):
-            base_name = f"{pure_role_name}_{base_index + idx}"
-            future = executor.submit(download_image, img_url, target_dir, base_name)
-            future_to_idx[future] = (idx, img_url, base_name)
-
-        for future in as_completed(future_to_idx):
-            idx, img_url, base_name = future_to_idx[future]
-            try:
-                if future.result():
-                    success += 1
-                    print(f"  ✅ {idx+1}: {base_name}.*")
-                else:
-                    print(f"  ❌ {idx+1}: 下载失败")
-            except Exception as e:
-                print(f"  ❌ {idx+1}: 异常 - {e}")
-
-    print(f"角色 {role} 完成，成功 {success} 张")
+if __name__ == "__main__":
+    app = CrawlerGUI()
+    app.run()

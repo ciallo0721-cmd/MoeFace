@@ -17,6 +17,7 @@ import traceback
 import argparse
 from pathlib import Path
 from datetime import datetime
+from typing import Tuple
 
 # ── 确保以脚本所在目录为基准路径 ────────────────────────────────────────────
 import sys as _sys
@@ -396,12 +397,16 @@ def _find_role_path(db_name: str) -> Path:
     return None
 
 
-def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None):
+def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None) -> Tuple[dict, bool]:
+    """
+    获取或构建特征库。
+    返回 (database, built)，built 表示是否实际进行了构建（True=构建了，False=使用了缓存）
+    """
     if not force_rebuild:
         db = load_database_from_json(db_name)
         if db is not None:
             log_fn(f"✅ 从缓存加载特征库 [{db_name}]，共 {len(db)} 个角色")
-            return db
+            return db, False
 
     if db_name == DEFAULT_DB_NAME:
         log_fn("构建全部特征库喵...")
@@ -414,14 +419,14 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
             db_path = DATA_DIR / db_name
             if not db_path.exists():
                 log_fn(f"❌ 文件夹不存在: {db_path}")
-                return {}
+                return {}, True
         log_fn(f"构建特征库喵~: {db_name}")
         db = build_database(db_path, log_fn, progress_fn)
 
     if db:
         save_database_to_json(db, db_name)
         log_fn(f"✅ 特征库已缓存喵~，共 {len(db)} 个角色")
-    return db
+    return db, True
 
 
 # ── 识别辅助 ──────────────────────────────────────────────────────────────
@@ -654,6 +659,9 @@ class MoeFaceApp:
         self._busy      = False
         self._preview_img = None   # 当前预览 PIL Image
 
+        # 自动关机标志
+        self._auto_shutdown_var = tk.BooleanVar(value=False)
+
         self._build_ui()
         self._load_models_async()
 
@@ -746,6 +754,14 @@ class MoeFaceApp:
                   ACCENT).pack(fill="x", padx=10, pady=(4, 2))
         self._btn(parent, " 加载特征库", self._load_db_now,
                   "#374151").pack(fill="x", padx=10, pady=2)
+
+        # — 自动关机复选框 —
+        self._auto_shutdown_cb = tk.Checkbutton(
+            parent, text="训练完成后自动关机", variable=self._auto_shutdown_var,
+            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
+            activebackground=PANEL, activeforeground=TEXT
+        )
+        self._auto_shutdown_cb.pack(anchor="w", padx=10, pady=2)
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
@@ -958,8 +974,8 @@ class MoeFaceApp:
         self.root.after(0, _reset)
         
         def _run():
-            db = get_or_build_database(db_name, force_rebuild=False, 
-                                       log_fn=self._log, progress_fn=self._progress_update)
+            db, built = get_or_build_database(db_name, force_rebuild=False,
+                                              log_fn=self._log, progress_fn=self._progress_update)
             self._database = db
             self._db_name  = db_name
             cnt = len(db)
@@ -971,11 +987,16 @@ class MoeFaceApp:
                 self._progress_bar["value"] = 100
                 self._progress_label.config(text=f"完成！共 {cnt} 个角色")
             self.root.after(0, _done)
+
+            # 如果实际进行了构建且开启了自动关机，则关机
+            if built and self._auto_shutdown_var.get():
+                self._log("训练完成，即将关机...")
+                self._shutdown_system()
         threading.Thread(target=_run, daemon=True).start()
 
     def _rebuild_db(self):
         db_name = self._db_var.get()
-        self._log(f" 强制重建: {db_name}")
+        self._log(f"强制重建: {db_name}")
         
         # 重置进度条
         def _reset():
@@ -984,8 +1005,8 @@ class MoeFaceApp:
         self.root.after(0, _reset)
         
         def _run():
-            db = get_or_build_database(db_name, force_rebuild=True, 
-                                       log_fn=self._log, progress_fn=self._progress_update)
+            db, built = get_or_build_database(db_name, force_rebuild=True,
+                                              log_fn=self._log, progress_fn=self._progress_update)
             self._database = db
             self._db_name  = db_name
             self._log(f"✅ 重建完成: {len(db)} 个角色")
@@ -996,7 +1017,33 @@ class MoeFaceApp:
                 self._progress_bar["value"] = 100
                 self._progress_label.config(text=f"完成！共 {len(db)} 个角色")
             self.root.after(0, _done)
+
+            # 重建一定会触发构建，如果开启了自动关机则关机
+            if built and self._auto_shutdown_var.get():
+                self._log("训练完成，即将关机...")
+                self._shutdown_system()
         threading.Thread(target=_run, daemon=True).start()
+
+    # ── 关机功能 ─────────────────────────────────────────────────────────
+    def _shutdown_system(self):
+        """执行系统关机（跨平台）"""
+        import platform
+        import subprocess
+        system = platform.system()
+        try:
+            if system == "Windows":
+                subprocess.run(["shutdown", "/s", "/t", "0"], check=True)
+            elif system == "Linux":
+                # 尝试使用 shutdown 命令（可能需要 root 权限）
+                subprocess.run(["shutdown", "-h", "now"], check=True)
+            elif system == "Darwin":  # macOS
+                subprocess.run(["shutdown", "-h", "now"], check=True)
+            else:
+                self._log(f"不支持自动关机的系统: {system}", "error")
+                return
+            self._log("关机命令已执行，系统即将关闭...")
+        except Exception as e:
+            self._log(f"关机失败: {e}，请手动关机或检查权限", "error")
 
     # ── 文件处理 ─────────────────────────────────────────────────────────
     def _pick_output(self):
@@ -1053,7 +1100,7 @@ class MoeFaceApp:
             if suggested != db_name or not db:
                 self._log(f" 自动选择特征库: {suggested}")
                 self.root.after(0, lambda: self._db_var.set(suggested))
-                db = get_or_build_database(suggested, log_fn=self._log)
+                db, _ = get_or_build_database(suggested, log_fn=self._log)
                 self._database = db
                 self._db_name  = suggested
 
@@ -1325,7 +1372,7 @@ class MoeFaceCLI:
         db_name = self.args.get("db_name") or DEFAULT_DB_NAME
         CLIColors.p(f"  特征库: {CLIColors.INFO}{db_name}{CLIColors.RESET}")
         force_rebuild = self.args.get("rebuild", False)
-        self.db = get_or_build_database(
+        self.db, _ = get_or_build_database(
             db_name, force_rebuild=force_rebuild,
             log_fn=self._log,
             progress_fn=lambda cur, tot, elapsed=0, lbl="": self._progress(cur, tot, elapsed, lbl)
@@ -1605,7 +1652,7 @@ class MoeFaceCLI:
   {CLIColors.LGREEN}--threshold{CLIColors.RESET}     识别阈值 0.1~0.95 (默认: 0.45)
   {CLIColors.LGREEN}--skip-frames{CLIColors.RESET}   视频跳帧数 (默认: 2)
   {CLIColors.LGREEN}--min-neighbors{CLIColors.RESET} 检测灵敏度 1~10 (默认: 3)
-  {CLIColors.LGREEN}--rebuild{CLOLors.RESET}         强制重建特征库
+  {CLIColors.LGREEN}--rebuild{CLIColors.RESET}         强制重建特征库
 
 {CLIColors.TITLE}示例:{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --output out.mp4{CLIColors.RESET}
