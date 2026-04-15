@@ -120,6 +120,8 @@ def save_database_to_json(database: dict, json_name: str):
         return None
     safe = _safe_json_name(json_name)
     json_path = FEATURES_DIR / f"{safe}.json"
+    # 创建子目录（如果 json_name 包含路径）
+    json_path.parent.mkdir(parents=True, exist_ok=True)
     serializable = {n: emb.tolist() for n, emb in database.items()}
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(serializable, f, indent=2, ensure_ascii=False)
@@ -460,18 +462,26 @@ def draw_chinese_text(img, text, position, font_size=18, color=(0, 255, 0)):
 
 
 # ── 视频/图片处理（运行于子线程）──────────────────────────────────────────────
-try:
-    from moviepy.video.io.VideoFileClip import VideoFileClip
-    MOVIEPY_AVAILABLE = True
-except ImportError:
-    MOVIEPY_AVAILABLE = False
+MOVIEPY_AVAILABLE = False  # 默认禁用，延迟导入检测
 
 
 def _add_audio(src_video, out_video, tmp_video):
+    # 延迟导入：只在需要时检测 moviepy + ffmpeg 是否可用
+    global MOVIEPY_AVAILABLE
+    if not MOVIEPY_AVAILABLE:
+        try:
+            from moviepy.video.io.VideoFileClip import VideoFileClip
+            MOVIEPY_AVAILABLE = True
+        except (ImportError, RuntimeError):
+            # ImportError: moviepy 未安装
+            # RuntimeError: ffmpeg 未安装
+            MOVIEPY_AVAILABLE = False
+
     if not MOVIEPY_AVAILABLE:
         shutil.move(tmp_video, out_video)
         return
     try:
+        from moviepy.video.io.VideoFileClip import VideoFileClip
         vc  = VideoFileClip(src_video)
         sc  = VideoFileClip(tmp_video)
         fin = sc.with_audio(vc.audio)
