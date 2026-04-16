@@ -28,8 +28,8 @@ def _resource_base() -> Path:
         return Path(_sys._MEIPASS)
     return Path(__file__).resolve().parent
 
-BASE_DIR = Path(__file__).resolve().parent  # 数据/特征库写在可执行文件旁边
-RESOURCE_DIR = _resource_base()             # XML/字体等只读资源
+BASE_DIR = Path(__file__).resolve().parent
+RESOURCE_DIR = _resource_base()
 
 os.chdir(BASE_DIR)
 
@@ -54,12 +54,7 @@ except ImportError:
 
 # ── 角色文件夹扫描 ────────────────────────────────────────────────────────
 def scan_role_folders(data_root: Path = DATA_DIR):
-    """
-    扫描 data 目录，返回所有角色名称列表。
-    支持新旧两种目录结构：
-    - 旧：data/角色名/*
-    - 新：data/游戏名/角色名/*
-    """
+    """扫描 data 目录，返回所有角色名称列表。"""
     roles = []
     if not data_root.exists():
         return roles
@@ -68,14 +63,11 @@ def scan_role_folders(data_root: Path = DATA_DIR):
         if not game_dir.is_dir():
             continue
 
-        # 新结构：游戏名/角色名 两层
         subdirs = [d for d in game_dir.iterdir() if d.is_dir()]
         if subdirs and any(d.is_dir() for d in game_dir.iterdir()):
-            # 是游戏文件夹，里面有角色子文件夹
             for role_dir in subdirs:
                 roles.append(f"{game_dir.name}/{role_dir.name}")
         else:
-            # 旧结构或扁平结构
             roles.append(game_dir.name)
 
     return sorted(roles)
@@ -83,10 +75,6 @@ def scan_role_folders(data_root: Path = DATA_DIR):
 
 # ── 别名模块：从 cname/name.json 加载 ─────────────────────────────────────
 def load_alias_map(path: Path = CNAME_PATH):
-    """
-    返回 list[dict]，每项格式：
-        {"db_name": "角色名", "aliases": ["别名1", "别名2", ...]}
-    """
     if not path.exists():
         warnings.warn(f"(｡•́︿•̀｡),主人,别名配置文件丢了喵: {path}")
         return []
@@ -101,7 +89,6 @@ def load_alias_map(path: Path = CNAME_PATH):
 ALIAS_MAP = load_alias_map()
 
 def get_db_name_from_filename(filename: str) -> str:
-    """根据文件名中的关键词匹配最合适的角色特征库名称"""
     name_lower = filename.lower()
     for entry in ALIAS_MAP:
         for alias in entry.get("aliases", []):
@@ -112,7 +99,6 @@ def get_db_name_from_filename(filename: str) -> str:
 
 # ── JSON 特征库管理 ────────────────────────────────────────────────────────
 def _safe_json_name(name: str) -> str:
-    """生成安全文件名（保留汉字、字母、数字、常用符号，含斜杠用于游戏/角色路径）"""
     keep = set("._- ·•/")
     return "".join(c for c in name if c.isalnum() or c in keep or "\u4e00" <= c <= "\u9fff")
 
@@ -121,7 +107,6 @@ def save_database_to_json(database: dict, json_name: str):
         return None
     safe = _safe_json_name(json_name)
     json_path = FEATURES_DIR / f"{safe}.json"
-    # 创建子目录（如果 json_name 包含路径）
     json_path.parent.mkdir(parents=True, exist_ok=True)
     serializable = {n: emb.tolist() for n, emb in database.items()}
     with open(json_path, "w", encoding="utf-8") as f:
@@ -149,6 +134,16 @@ _models_ready = False
 _anime_cascade = None
 _resnet = None
 _device = None
+# 每个线程独立的 CascadeClassifier（解决线程安全问题）
+_thread_local = threading.local()
+
+def _get_thread_cascade():
+    """获取当前线程的 CascadeClassifier（每个线程独立）"""
+    if not hasattr(_thread_local, 'cascade'):
+        # 每个线程创建自己的 CascadeClassifier 实例
+        cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
+        _thread_local.cascade = cascade
+    return _thread_local.cascade
 
 def _ensure_models(log_fn=print):
     """确保模型已加载（线程安全，只初始化一次）"""
@@ -167,6 +162,7 @@ def _ensure_models(log_fn=print):
             if not CASCADE_PATH.exists():
                 log_fn("❌ (｡•́︿•̀｡),找不到 lbpcascade_animeface.xml")
                 return False
+            # 主线程也创建一个实例
             clf = cv2.CascadeClassifier(cascade_p)
             if clf.empty():
                 log_fn("❌ (｡•́︿•̀｡),CascadeClassifier 加载失败")
@@ -187,23 +183,31 @@ def _ensure_models(log_fn=print):
 
 
 def extract_features_from_image(image_path: str, log_fn=print):
+    """提取单张图片的特征，若模型未就绪或图片无效则返回 None"""
+    global _resnet, _device
+    # 确保模型已加载
+    if not _ensure_models(log_fn):
+        log_fn("❌ 模型未就绪，无法提取特征")
+        return None
+
     import cv2, torch
     import numpy as np
-    
-    # 每个线程加载自己的 CascadeClassifier（线程安全）
-    # 使用模块顶部定义的 CASCADE_PATH，兼容 PyInstaller 打包
-    cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
-    
+
+    # 获取当前线程专用的 CascadeClassifier
+    cascade = _get_thread_cascade()
+
     try:
         with open(image_path, "rb") as f:
             data = np.frombuffer(f.read(), dtype=np.uint8)
         img = cv2.imdecode(data, cv2.IMREAD_COLOR)
         if img is None:
+            log_fn(f"⚠️ 无法解码图片: {image_path}")
             return None
-    except Exception:
+    except Exception as e:
+        log_fn(f"⚠️ 读取图片失败 {image_path}: {e}")
         return None
 
-    # 限制最大分辨率，防止内存溢出
+    # 限制最大分辨率
     MAX_DIM = 4096
     h, w = img.shape[:2]
     if max(h, w) > MAX_DIM:
@@ -211,7 +215,7 @@ def extract_features_from_image(image_path: str, log_fn=print):
         new_w, new_h = int(w * scale), int(h * scale)
         img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     faces = cascade.detectMultiScale(
         gray, scaleFactor=1.02, minNeighbors=3,
         minSize=(20, 20), maxSize=(800, 800)
@@ -221,29 +225,23 @@ def extract_features_from_image(image_path: str, log_fn=print):
 
     faces = sorted(faces, key=lambda r: r[2] * r[3], reverse=True)
     x, y, w, h = faces[0]
-    face      = img[y:y+h, x:x+w]
-    face_rgb  = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-    face_rsz  = cv2.resize(face_rgb, (160, 160))
-    tensor    = (torch.tensor(face_rsz).permute(2, 0, 1)
-                 .float().unsqueeze(0).to(_device) / 255.0)
+    face = img[y:y+h, x:x+w]
+    face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+    face_rsz = cv2.resize(face_rgb, (160, 160))
+    tensor = (torch.tensor(face_rsz).permute(2, 0, 1)
+              .float().unsqueeze(0).to(_device) / 255.0)
     with torch.no_grad():
         emb = _resnet(tensor).cpu().numpy().flatten()
     return emb
 
 
 def build_database(data_root: Path, log_fn=print, progress_fn=None):
-    """
-    构建特征库，支持进度回调和多线程加速。
+    """构建特征库，确保模型已加载"""
+    # 确保模型就绪
+    if not _ensure_models(log_fn):
+        log_fn("❌ 模型加载失败，无法构建特征库")
+        return {}
 
-    新目录结构：游戏名称/角色名称/*.jpg
-    旧目录结构：角色名称/*.jpg（兼容）
-
-    progress_fn(current, total, elapsed_sec, db_name) -> None
-        current: 已处理图片数
-        total: 总图片数
-        elapsed_sec: 已耗时（秒）
-        db_name: 当前角色名
-    """
     import numpy as np
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time
@@ -262,42 +260,30 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
             files += list(folder.glob(f"*{ext.upper()}"))
         return files
 
-    def _extract_single(img_path):
-        """提取单张图片特征，用于多线程"""
-        e = extract_features_from_image(str(img_path), lambda *_: None)
-        return (str(img_path), e)
-
-    # 统计总图片数和总角色数（每角色最多50张）
     MAX_PER_PERSON = 50
     total_images = 0
-    person_images = {}  # {person_name: [img_paths]}
+    person_images = {}
 
-    # 遍历 data_root 下的子目录
     subdirs = [d for d in data_root.iterdir() if d.is_dir()]
 
     if subdirs:
-        # 新结构：游戏/角色 两层
         game_dirs = [d for d in subdirs if any(e.is_dir() for e in d.iterdir())]
-        # 如果有游戏子文件夹，使用新结构
         if game_dirs:
             for game_dir in game_dirs:
                 for role_dir in game_dir.iterdir():
                     if role_dir.is_dir():
                         imgs = _gather(role_dir)
                         if imgs:
-                            # 使用 "游戏名/角色名" 作为特征库中的唯一标识
                             key = f"{game_dir.name}/{role_dir.name}"
                             person_images[key] = imgs[:MAX_PER_PERSON]
                             total_images += min(len(imgs), MAX_PER_PERSON)
         else:
-            # 旧结构：扁平目录，直接是角色名
             for person_dir in subdirs:
                 imgs = _gather(person_dir)
                 if imgs:
                     person_images[person_dir.name] = imgs[:MAX_PER_PERSON]
                     total_images += min(len(imgs), MAX_PER_PERSON)
     else:
-        # data_root 直接包含图片（空游戏文件夹情况）
         imgs = _gather(data_root)
         if imgs:
             person_images[data_root.name] = imgs[:MAX_PER_PERSON]
@@ -305,63 +291,49 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
 
     log_fn(f"多角色模式，共 {len(person_images)} 个角色，{total_images} 张图片")
 
-    # 多线程配置：限制为 2 线程，避免内存爆炸
-    import os as _os
-    max_workers = min(2, total_images)
-
+    # 使用单线程避免 CascadeClassifier 线程安全问题
+    max_workers = 1  # 强制单线程
     start_time = time.time()
-    processed = [0]  # 用列表包装以便在闭包中修改
+    processed = [0]
 
     def _process_person(person_name: str):
         import gc
-        imgs = person_images[person_name][:50]  # 每角色最多50张，避免内存爆炸
+        imgs = person_images[person_name][:50]
         if not imgs:
             return None
 
-        # 进度回调：角色开始
         if progress_fn:
             progress_fn(processed[0], total_images, time.time() - start_time, person_name)
 
         all_embs = []
         for i, p in enumerate(imgs):
-            e = extract_features_from_image(str(p), lambda *_: None)
+            e = extract_features_from_image(str(p), log_fn)
             if e is not None:
                 all_embs.append(e)
             processed[0] += 1
 
-            # 每处理 5 张图更新一次进度
             if progress_fn and (i + 1) % 5 == 0:
                 progress_fn(processed[0], total_images, time.time() - start_time, person_name)
 
-        # 强制垃圾回收，释放内存
         gc.collect()
 
         if all_embs:
             return (person_name, np.mean(all_embs, axis=0))
         return None
 
-    # 多线程处理各角色
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_process_person, name): name
-            for name in person_images.keys()
-        }
+    # 单线程处理各角色（避免 OpenCV 级联分类器的线程安全问题）
+    for person_name in person_images.keys():
+        result = _process_person(person_name)
+        if result is not None:
+            name, avg = result
+            database[name] = avg
+            log_fn(f"  ✅ {name} 完成")
+        else:
+            log_fn(f"  ⚠️  {person_name} 无有效人脸喵～(｡•́︿•̀｡)")
 
-        for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                name, avg = result
-                database[name] = avg
-                log_fn(f"  ✅ {name} 完成")
-            else:
-                person_name = futures[future]
-                log_fn(f"  ⚠️  {person_name} 无有效人脸喵～(｡•́︿•̀｡)")
+        if progress_fn:
+            progress_fn(processed[0], total_images, time.time() - start_time, "")
 
-            # 角色完成时更新进度
-            if progress_fn:
-                progress_fn(processed[0], total_images, time.time() - start_time, "")
-
-    # 最终进度 100%
     if progress_fn:
         progress_fn(total_images, total_images, time.time() - start_time, "")
 
@@ -369,39 +341,27 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
 
 
 def _find_role_path(db_name: str) -> Path:
-    """
-    根据角色名找到对应的路径。
-    新结构：游戏/角色
-    返回角色文件夹的路径，如果找不到返回 None
-    """
     if not DATA_DIR.exists():
         return None
 
-    # 先尝试旧结构：直接是角色名
     old_path = DATA_DIR / db_name
     if old_path.exists() and old_path.is_dir():
         return old_path
 
-    # 新结构：遍历游戏文件夹找角色
     for game_dir in DATA_DIR.iterdir():
         if game_dir.is_dir():
             role_path = game_dir / db_name
             if role_path.exists() and role_path.is_dir():
                 return role_path
-            # 也支持 "游戏/角色" 格式的 db_name
             if "/" in db_name:
                 parts = db_name.split("/", 1)
                 if game_dir.name == parts[0] and (game_dir / parts[1]).exists():
                     return game_dir / parts[1]
-
     return None
 
 
 def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None) -> Tuple[dict, bool]:
-    """
-    获取或构建特征库。
-    返回 (database, built)，built 表示是否实际进行了构建（True=构建了，False=使用了缓存）
-    """
+    """获取或构建特征库，返回 (database, built)"""
     if not force_rebuild:
         db = load_database_from_json(db_name)
         if db is not None:
@@ -412,10 +372,8 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
         log_fn("构建全部特征库喵...")
         db = build_database(DATA_DIR, log_fn, progress_fn)
     else:
-        # 尝试找角色对应的路径
         db_path = _find_role_path(db_name)
         if db_path is None:
-            # 尝试直接作为游戏名或角色名
             db_path = DATA_DIR / db_name
             if not db_path.exists():
                 log_fn(f"❌ 文件夹不存在: {db_path}")
@@ -436,7 +394,7 @@ def cosine_similarity(a, b):
 
 def recognize_face(face_img, database: dict, threshold=0.45):
     import cv2, torch
-    face   = cv2.resize(face_img, (160, 160))
+    face = cv2.resize(face_img, (160, 160))
     tensor = (torch.tensor(face).permute(2, 0, 1)
               .float().unsqueeze(0).to(_device) / 255.0)
     with torch.no_grad():
@@ -467,19 +425,15 @@ def draw_chinese_text(img, text, position, font_size=18, color=(0, 255, 0)):
 
 
 # ── 视频/图片处理（运行于子线程）──────────────────────────────────────────────
-MOVIEPY_AVAILABLE = False  # 默认禁用，延迟导入检测
-
+MOVIEPY_AVAILABLE = False
 
 def _add_audio(src_video, out_video, tmp_video):
-    # 延迟导入：只在需要时检测 moviepy + ffmpeg 是否可用
     global MOVIEPY_AVAILABLE
     if not MOVIEPY_AVAILABLE:
         try:
             from moviepy.video.io.VideoFileClip import VideoFileClip
             MOVIEPY_AVAILABLE = True
         except (ImportError, RuntimeError):
-            # ImportError: moviepy 未安装
-            # RuntimeError: ffmpeg 未安装
             MOVIEPY_AVAILABLE = False
 
     if not MOVIEPY_AVAILABLE:
@@ -502,7 +456,6 @@ def _add_audio(src_video, out_video, tmp_video):
 def process_image_file(source: str, database: dict, threshold=0.45,
                        min_neighbors=3,
                        log_fn=print, preview_fn=None, done_fn=None):
-    """识别单张图片"""
     import cv2
     import numpy as np
     try:
@@ -547,7 +500,6 @@ def process_video_file(source: str, database: dict, output_path=None,
                        threshold=0.45, skip_frames=2, min_neighbors=3,
                        log_fn=print, preview_fn=None,
                        stop_event: threading.Event = None, done_fn=None):
-    """处理视频文件，支持逐帧预览"""
     import cv2
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
@@ -657,9 +609,9 @@ class MoeFaceApp:
         self._db_name:  str    = ""
         self._stop_evt: threading.Event = threading.Event()
         self._busy      = False
-        self._preview_img = None   # 当前预览 PIL Image
+        self._preview_img = None
+        self._models_ready = False
 
-        # 自动关机标志
         self._auto_shutdown_var = tk.BooleanVar(value=False)
 
         self._build_ui()
@@ -674,7 +626,6 @@ class MoeFaceApp:
         TEXT   = "#cdd6f4"
         MUTED  = "#6c7086"
 
-        # ── 顶部标题栏 ───────────────────────────────────────────────────
         hdr = tk.Frame(root, bg=ACCENT, height=48)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
@@ -687,16 +638,13 @@ class MoeFaceApp:
                                     bg=ACCENT, fg="#e9d5ff")
         self._status_lbl.pack(side="right", padx=16)
 
-        # ── 主体区域（左 + 右）──────────────────────────────────────────
         body = tk.Frame(root, bg=DARK)
         body.pack(fill="both", expand=True)
 
-        # 左侧控制面板
         left = tk.Frame(body, bg=PANEL, width=260)
         left.pack(side="left", fill="y", padx=(8, 0), pady=8)
         left.pack_propagate(False)
 
-        # 右侧：预览 + 日志
         right = tk.Frame(body, bg=DARK)
         right.pack(side="left", fill="both", expand=True, padx=8, pady=8)
 
@@ -715,7 +663,6 @@ class MoeFaceApp:
     def _build_left(self, parent, PANEL, ACCENT, TEXT, MUTED):
         pad = {"padx": 10, "pady": 4, "anchor": "w"}
 
-        # — 特征库选择 —
         self._lbl(parent, "特征库", PANEL, MUTED,
                   font=("微软雅黑", 8)).pack(**pad)
 
@@ -735,7 +682,6 @@ class MoeFaceApp:
                          foreground="#cdd6f4", bordercolor="#7c3aed",
                          arrowcolor="#cdd6f4")
 
-        # — 进度条框架 —
         self._progress_frame = tk.Frame(parent, bg=PANEL)
         self._progress_frame.pack(fill="x", padx=10, pady=(4, 2))
         self._progress_label = self._lbl(self._progress_frame, 
@@ -748,14 +694,14 @@ class MoeFaceApp:
         self._progress_bar.pack(fill="x", pady=2)
         self._progress_bar["maximum"] = 100
         self._progress_bar["value"] = 0
-        
-        # — 重建特征库按钮 —
-        self._btn(parent, " 重建特征库", self._rebuild_db,
-                  ACCENT).pack(fill="x", padx=10, pady=(4, 2))
-        self._btn(parent, " 加载特征库", self._load_db_now,
-                  "#374151").pack(fill="x", padx=10, pady=2)
 
-        # — 自动关机复选框 —
+        self._rebuild_btn = self._btn(parent, " 重建特征库", self._rebuild_db,
+                                      ACCENT, state="disabled")
+        self._rebuild_btn.pack(fill="x", padx=10, pady=(4, 2))
+        self._load_btn = self._btn(parent, " 加载特征库", self._load_db_now,
+                                   "#374151", state="disabled")
+        self._load_btn.pack(fill="x", padx=10, pady=2)
+
         self._auto_shutdown_cb = tk.Checkbutton(
             parent, text="训练完成后自动关机", variable=self._auto_shutdown_var,
             bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
@@ -765,7 +711,6 @@ class MoeFaceApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
-        # — 阈值 —
         self._lbl(parent, "识别阈值", PANEL, MUTED,
                   font=("微软雅黑", 8)).pack(**pad)
         th_frame = tk.Frame(parent, bg=PANEL)
@@ -783,7 +728,6 @@ class MoeFaceApp:
         self._threshold_var.trace_add("write", lambda *_: self._th_label.config(
             text=f"当前: {self._threshold_var.get():.2f}"))
 
-        # — 跳帧数 —
         self._lbl(parent, "视频跳帧（每N帧识别一次）", PANEL, MUTED,
                   font=("微软雅黑", 8)).pack(**pad)
         self._skip_var = tk.IntVar(value=2)
@@ -797,7 +741,6 @@ class MoeFaceApp:
                    relief="flat", font=("微软雅黑", 9), width=6
                    ).pack(padx=10, pady=2, anchor="w")
 
-        # — 检测灵敏度（minNeighbors，越大越严格/误检越少）—
         self._lbl(parent, "检测灵敏度（越大误检越少）", PANEL, MUTED,
                   font=("微软雅黑", 8)).pack(**pad)
         mn_frame = tk.Frame(parent, bg=PANEL)
@@ -817,7 +760,6 @@ class MoeFaceApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
-        # — 输出视频路径 —
         self._lbl(parent, "保存识别视频（可选）", PANEL, MUTED,
                   font=("微软雅黑", 8)).pack(**pad)
         out_frame = tk.Frame(parent, bg=PANEL)
@@ -832,23 +774,21 @@ class MoeFaceApp:
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
-        # — 打开文件按钮 —
-        self._btn(parent, "  打开图片/视频", self._open_file,
-                  ACCENT).pack(fill="x", padx=10, pady=2)
+        self._open_btn = self._btn(parent, "  打开图片/视频", self._open_file,
+                                   ACCENT, state="disabled")
+        self._open_btn.pack(fill="x", padx=10, pady=2)
         self._stop_btn = self._btn(parent, "⏹  停止处理", self._stop_processing,
                                    "#dc2626", state="disabled")
         self._stop_btn.pack(fill="x", padx=10, pady=2)
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
-        # — 别名管理入口 —
         self._btn(parent, " 管理角色别名", self._open_alias_editor,
                   "#374151").pack(fill="x", padx=10, pady=2)
         self._btn(parent, " 清空日志", self._clear_log,
                   "#374151").pack(fill="x", padx=10, pady=2)
 
     def _build_right(self, parent, DARK, PANEL, TEXT, MUTED):
-        # 上方：拖拽/预览区
         preview_frame = tk.Frame(parent, bg=PANEL, bd=2, relief="groove")
         preview_frame.pack(fill="both", expand=True, pady=(0, 6))
 
@@ -865,17 +805,14 @@ class MoeFaceApp:
                                          highlightthickness=0)
         self._preview_canvas.pack(fill="both", expand=True)
 
-        # 绑定拖拽
         if DND_AVAILABLE:
             self._preview_canvas.drop_target_register(tkdnd.DND_FILES)
             self._preview_canvas.dnd_bind("<<Drop>>", self._on_drop)
         else:
-            # 无 tkinterdnd2 时显示提示
             self._drop_label.config(
                 text="主人,将图片或视频拖拽到此处喵~（需安装 tkinterdnd2）\n或点击左侧「打开图片/视频」按钮\n\n支持 JPG / PNG / MP4 / AVI / MKV 等"
             )
 
-        # 下方：日志
         log_frame = tk.Frame(parent, bg=PANEL)
         log_frame.pack(fill="x", ipady=4)
         tk.Label(log_frame, text="运行日志", bg=PANEL, fg=MUTED,
@@ -891,11 +828,19 @@ class MoeFaceApp:
     def _load_models_async(self):
         def _run():
             ok = _ensure_models(self._log)
+            self._models_ready = ok
             if ok:
                 self._set_status("✅ 就绪，请拖入文件")
+                self.root.after(0, self._enable_controls)
             else:
                 self._set_status("❌ 模型加载失败(｡•́︿•̀｡)，请检查依赖")
         threading.Thread(target=_run, daemon=True).start()
+
+    def _enable_controls(self):
+        """模型加载完成后启用相关按钮"""
+        self._rebuild_btn.config(state="normal")
+        self._load_btn.config(state="normal")
+        self._open_btn.config(state="normal")
 
     # ── 日志 ──────────────────────────────────────────────────────────────
     def _log(self, msg: str):
@@ -916,7 +861,6 @@ class MoeFaceApp:
 
     # ── 预览帧更新 ───────────────────────────────────────────────────────
     def _show_frame_cv(self, cv_img):
-        """将 OpenCV BGR 图像显示到 Canvas（在主线程执行）"""
         import cv2
         from PIL import Image, ImageTk
         def _upd():
@@ -934,18 +878,15 @@ class MoeFaceApp:
             self._preview_canvas.delete("all")
             self._preview_canvas.create_image(cw // 2, ch // 2,
                                               anchor="center", image=tk_img)
-            self._preview_canvas._tk_img = tk_img  # 防止 GC
+            self._preview_canvas._tk_img = tk_img
             self._drop_label.place_forget()
         self.root.after(0, _upd)
 
     # ── 特征库操作 ────────────────────────────────────────────────────────
     def _progress_update(self, current: int, total: int, elapsed: float, db_name: str):
-        """进度回调：更新进度条和剩余时间"""
         if total <= 0:
             return
-        
         pct = min(current / total * 100, 100)
-        # 估算剩余时间
         if current > 0 and current < total:
             eta_sec = (elapsed / current) * (total - current)
             if eta_sec >= 60:
@@ -954,25 +895,24 @@ class MoeFaceApp:
                 eta_str = f"约 {int(eta_sec)} 秒"
         else:
             eta_str = "即将完成"
-        
         name_str = f" [{db_name}]" if db_name else ""
         text = f"构建中{name_str} {current}/{total} ({pct:.0f}%) 剩余: {eta_str}"
-        
         def _upd():
             self._progress_bar["value"] = pct
             self._progress_label.config(text=text)
         self.root.after(0, _upd)
 
     def _load_db_now(self):
+        if not self._models_ready:
+            self._log("请等待模型加载完成后再操作")
+            return
         db_name = self._db_var.get()
         self._log(f"加载特征库: {db_name}")
-        
-        # 重置进度条
         def _reset():
             self._progress_bar["value"] = 0
             self._progress_label.config(text="准备加载...")
         self.root.after(0, _reset)
-        
+
         def _run():
             db, built = get_or_build_database(db_name, force_rebuild=False,
                                               log_fn=self._log, progress_fn=self._progress_update)
@@ -981,29 +921,27 @@ class MoeFaceApp:
             cnt = len(db)
             self._log(f"特征库就绪: {cnt} 个角色")
             self._set_status(f"✅ 特征库已加载（{cnt} 角色）")
-            
-            # 完成时重置进度条
             def _done():
                 self._progress_bar["value"] = 100
                 self._progress_label.config(text=f"完成！共 {cnt} 个角色")
             self.root.after(0, _done)
 
-            # 如果实际进行了构建且开启了自动关机，则关机
             if built and self._auto_shutdown_var.get():
                 self._log("训练完成，即将关机...")
                 self._shutdown_system()
         threading.Thread(target=_run, daemon=True).start()
 
     def _rebuild_db(self):
+        if not self._models_ready:
+            self._log("请等待模型加载完成后再操作")
+            return
         db_name = self._db_var.get()
         self._log(f"强制重建: {db_name}")
-        
-        # 重置进度条
         def _reset():
             self._progress_bar["value"] = 0
             self._progress_label.config(text="准备重建...")
         self.root.after(0, _reset)
-        
+
         def _run():
             db, built = get_or_build_database(db_name, force_rebuild=True,
                                               log_fn=self._log, progress_fn=self._progress_update)
@@ -1011,14 +949,11 @@ class MoeFaceApp:
             self._db_name  = db_name
             self._log(f"✅ 重建完成: {len(db)} 个角色")
             self._set_status(f"✅ 特征库已重建（{len(db)} 角色）")
-            
-            # 完成时重置进度条
             def _done():
                 self._progress_bar["value"] = 100
                 self._progress_label.config(text=f"完成！共 {len(db)} 个角色")
             self.root.after(0, _done)
 
-            # 重建一定会触发构建，如果开启了自动关机则关机
             if built and self._auto_shutdown_var.get():
                 self._log("训练完成，即将关机...")
                 self._shutdown_system()
@@ -1026,7 +961,6 @@ class MoeFaceApp:
 
     # ── 关机功能 ─────────────────────────────────────────────────────────
     def _shutdown_system(self):
-        """执行系统关机（跨平台）"""
         import platform
         import subprocess
         system = platform.system()
@@ -1034,9 +968,8 @@ class MoeFaceApp:
             if system == "Windows":
                 subprocess.run(["shutdown", "/s", "/t", "0"], check=True)
             elif system == "Linux":
-                # 尝试使用 shutdown 命令（可能需要 root 权限）
                 subprocess.run(["shutdown", "-h", "now"], check=True)
-            elif system == "Darwin":  # macOS
+            elif system == "Darwin":
                 subprocess.run(["shutdown", "-h", "now"], check=True)
             else:
                 self._log(f"不支持自动关机的系统: {system}", "error")
@@ -1055,6 +988,9 @@ class MoeFaceApp:
             self._out_var.set(path)
 
     def _open_file(self):
+        if not self._models_ready:
+            self._log("模型未就绪，请稍候...")
+            return
         path = filedialog.askopenfilename(
             filetypes=[
                 ("图片/视频", " ".join(f"*{e}" for e in IMAGE_EXTS | VIDEO_EXTS)),
@@ -1067,11 +1003,8 @@ class MoeFaceApp:
             self._dispatch_file(path)
 
     def _on_drop(self, event):
-        """接收拖拽文件，兼容含空格路径和多文件"""
         import re
         raw = event.data.strip()
-        # tkinterdnd2 对含空格的路径用花括号包裹，多文件间用空格分隔
-        # 提取第一个路径（花括号内 或 第一个空格前）
         matches = re.findall(r'\{([^}]+)\}|(\S+)', raw)
         if matches:
             path = (matches[0][0] or matches[0][1]).strip()
@@ -1080,7 +1013,7 @@ class MoeFaceApp:
         self._dispatch_file(path)
 
     def _dispatch_file(self, path: str):
-        if not _models_ready:
+        if not self._models_ready:
             self._log("模型尚未加载完成，请稍候…")
             return
         if self._busy:
@@ -1094,7 +1027,6 @@ class MoeFaceApp:
         self._stop_evt.clear()
 
         def _load_and_run():
-            # 特征库加载在子线程中执行，避免阻塞 GUI 主线程
             db = self._database
             db_name = self._db_name
             if suggested != db_name or not db:
@@ -1169,7 +1101,6 @@ class MoeFaceApp:
                                         font=("Consolas", 9), relief="flat")
         txt.pack(fill="both", expand=True, padx=10, pady=4)
 
-        # 读取现有内容
         try:
             with open(CNAME_PATH, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -1182,7 +1113,6 @@ class MoeFaceApp:
                 data = json.loads(txt.get("1.0", "end"))
                 with open(CNAME_PATH, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
-                # 重载别名
                 global ALIAS_MAP
                 ALIAS_MAP = load_alias_map()
                 messagebox.showinfo("保存成功", "别名配置已更新！", parent=win)
@@ -1207,7 +1137,7 @@ class MoeFaceApp:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CLI 模式（终端图形化界面）
+#  CLI 模式（终端图形化界面）- 增强进度条显示
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CLIColors:
@@ -1216,7 +1146,6 @@ class CLIColors:
     BOLD    = "\033[1m"
     DIM     = "\033[2m"
 
-    # 前景色
     BLACK   = "\033[30m"
     RED     = "\033[31m"
     GREEN   = "\033[32m"
@@ -1226,7 +1155,6 @@ class CLIColors:
     CYAN    = "\033[36m"
     WHITE   = "\033[37m"
 
-    # 亮色
     LGRAY   = "\033[90m"
     LRED    = "\033[91m"
     LGREEN  = "\033[92m"
@@ -1236,7 +1164,6 @@ class CLIColors:
     LCYAN   = "\033[96m"
     LWHITE  = "\033[97m"
 
-    # 背景色
     BGBLACK  = "\033[40m"
     BGRED    = "\033[41m"
     BGGREEN  = "\033[42m"
@@ -1246,7 +1173,6 @@ class CLIColors:
     BGCYAN   = "\033[46m"
     BGWHITE  = "\033[47m"
 
-    # 合成
     HEADER  = BOLD + LGRAY
     TITLE   = BOLD + MAGENTA
     SUCCESS = BOLD + LGREEN
@@ -1254,12 +1180,11 @@ class CLIColors:
     ERROR   = BOLD + LRED
     INFO    = BOLD + LCYAN
     MUTED   = DIM + LGRAY
-    PROGRESS_BG = BGWHITE
+    PROGRESS_BG = BGCYAN
     PROGRESS_FG = BGGREEN
 
     @staticmethod
     def p(text, color="", end="\n"):
-        """打印彩色文本"""
         if color:
             print(f"{color}{text}{CLIColors.RESET}", end=end)
         else:
@@ -1267,40 +1192,39 @@ class CLIColors:
 
     @staticmethod
     def clear_line():
-        """清除当前行"""
         sys.stdout.write("\033[2K\r")
         sys.stdout.flush()
 
     @staticmethod
-    def progress_bar(percent: float, width: int = 40,
+    def progress_bar(percent: float, width: int = 50,
                      fg_color=None, bg_color=None):
-        """生成进度条字符串"""
+        """生成进度条字符串（更明显）"""
         filled = int(width * percent)
         empty  = width - filled
+        # 使用更明显的字符
         bar = "█" * filled + "░" * empty
         percent_str = f"{percent * 100:5.1f}%"
-        fg = fg_color or CLIColors.PROGRESS_FG
+        fg = fg_color or CLIColors.LGREEN
         bg = bg_color or CLIColors.PROGRESS_BG
-        return f"{fg}{CLIColors.BOLD}{bar}{CLIColors.RESET} {fg}{percent_str}{CLIColors.RESET}"
+        return f"{fg}{CLIColors.BOLD}{bar}{CLIColors.RESET} {CLIColors.LYELLOW}{percent_str}{CLIColors.RESET}"
 
-#═══════════════════
-    #                   ║
+
 class MoeFaceCLI:
     """CLI 模式主类"""
 
     BANNER = rf"""{CLIColors.TITLE}
-╔══════════════════════════════════════════════════╗
-║                                                  ║
-║   ███╗   ███╗  ██████╗ ███████╗                  ║
-║   ████╗ ████║ ██╔═══██╗██╔════╝                  ║
-║   ██╔████╔██║ ██║   ██║█████╗                    ║
-║   ██║╚██╔╝██║ ██║   ██║██╔══╝                    ║
-║   ██║ ╚═╝ ██║ ╚██████╔╝███████╗                  ║
-║   ╚═╝     ╚═╝  ╚═════╝ ╚══════╝                  ║
-║                                                  ║
-║            Face Recognition System               ║
-║                                                  ║
-╚══════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════╗
+║                                                                  ║
+║   ███╗   ███╗  ██████╗ ███████╗ ███████╗ █████╗  ██████╗███████╗ ║
+║   ████╗ ████║ ██╔═══██╗██╔════╝ ██╔════╝██╔══██╗██╔════╝██╔════╝ ║
+║   ██╔████╔██║ ██║   ██║█████╗   █████╗  ███████║██║     █████╗   ║
+║   ██║╚██╔╝██║ ██║   ██║██╔══╝   ██╔══╝  ██╔══██║██║     ██╔══╝   ║
+║   ██║ ╚═╝ ██║ ╚██████╔╝███████╗ ██║     ██║  ██║╚██████╗███████╗ ║
+║   ╚═╝     ╚═╝  ╚═════╝ ╚══════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝╚══════╝ ║
+║                                                                  ║
+║               Anime Face Recognition System                      ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
     {CLIColors.RESET}"""
 
     def __init__(self, args):
@@ -1311,8 +1235,8 @@ class MoeFaceCLI:
         self.stop_evt  = threading.Event()
         self._console_height = 0
         self._last_pct = -1.0
+        self._last_eta_str = ""
 
-    # ── 工具方法 ─────────────────────────────────────────────────────────
     def _log(self, msg: str, level: str = "info"):
         """带颜色的日志输出"""
         now  = datetime.now().strftime("%H:%M:%S")
@@ -1326,23 +1250,40 @@ class MoeFaceCLI:
 
     def _header(self, title: str):
         """分组标题"""
-        CLIColors.p(f"\n{CLIColors.HEADER}{'─' * 50}{CLIColors.RESET}", end="")
-        CLIColors.p(f"{CLIColors.HEADER} {title}{CLIColors.RESET}")
+        CLIColors.p(f"\n{CLIColors.HEADER}{'═' * 60}{CLIColors.RESET}")
+        CLIColors.p(f"{CLIColors.TITLE}  {title}{CLIColors.RESET}")
+        CLIColors.p(f"{CLIColors.HEADER}{'─' * 60}{CLIColors.RESET}")
 
     def _progress(self, current: int, total: int, elapsed: float = 0, label: str = ""):
-        """更新进度条（同一行覆盖）"""
+        """更新进度条（同一行覆盖）- 更明显的显示"""
         if total <= 0:
             return
         pct = min(current / total, 1.0)
-        bar = CLIColors.progress_bar(pct, width=28)
-        label_text = f" {label}" if label else ""
-        # 估算剩余时间
-        if elapsed > 0 and current > 0:
-            eta = elapsed * (total - current) / current
-            eta_text = f" 剩余: {int(eta // 60)}分{int(eta % 60)}秒"
-        else:
-            eta_text = ""
-        line = f"\r  {bar}{label_text}{eta_text}"
+        
+        # 计算 ETA
+        eta_text = ""
+        if elapsed > 0 and current > 0 and current < total:
+            eta_sec = elapsed * (total - current) / current
+            if eta_sec >= 3600:
+                eta_text = f"⏱️ 剩余: {int(eta_sec // 3600)}时{int((eta_sec % 3600) // 60)}分"
+            elif eta_sec >= 60:
+                eta_text = f"⏱️ 剩余: {int(eta_sec // 60)}分{int(eta_sec % 60)}秒"
+            else:
+                eta_text = f"⏱️ 剩余: {int(eta_sec)}秒"
+        
+        # 进度百分比和计数
+        count_text = f"📊 {current}/{total}"
+        
+        # 生成进度条
+        bar = CLIColors.progress_bar(pct, width=40)
+        
+        # 标签（当前角色）
+        label_text = f" 🎭 {label[:20]}" if label and label.strip() else ""
+        
+        # 构建进度行
+        line = f"\r{CLIColors.LCYAN}{bar}{CLIColors.RESET} {CLIColors.LYELLOW}{count_text}{CLIColors.RESET} {CLIColors.LGREEN}{eta_text}{CLIColors.RESET}{label_text}"
+        
+        # 清除并打印
         CLIColors.clear_line()
         print(line, end="", flush=True)
         self._last_pct = pct
@@ -1353,35 +1294,47 @@ class MoeFaceCLI:
         CLIColors.p(f"  {CLIColors.MUTED}├─{CLIColors.RESET} {fg}{name}{CLIColors.RESET}"
                     f" {CLIColors.MUTED}({count} 次){CLIColors.RESET}")
 
-    # ── 主流程 ───────────────────────────────────────────────────────────
     def run(self):
         # 打印 Banner
         print(self.BANNER)
 
         # 步骤 1: 加载模型
         self._header("① 加载模型")
-        CLIColors.p(f"  设备: {CLIColors.INFO}"
-                    f"{'NVIDIA GPU (CUDA)' if os.path.exists('/dev/nvidia0') or shutil.which('nvidia-smi') else 'CPU'}"
-                    f"{CLIColors.RESET}")
+        
+        # 检测设备
+        import torch
+        device_info = "NVIDIA GPU (CUDA)" if torch.cuda.is_available() else "CPU"
+        CLIColors.p(f"  🔧 设备: {CLIColors.LGREEN}{device_info}{CLIColors.RESET}")
+        
         if not _ensure_models(lambda m: self._log(m, "info" if "✓" in m or "✅" in m else "warn")):
             self._log("模型加载失败，主人～(｡•́︿•̀｡)", "error")
             sys.exit(1)
+        
+        CLIColors.p(f"  ✅ 模型加载完成！{CLIColors.LGREEN}(°▽°)/{CLIColors.RESET}")
 
         # 步骤 2: 加载特征库
         self._header("② 加载特征库")
         db_name = self.args.get("db_name") or DEFAULT_DB_NAME
-        CLIColors.p(f"  特征库: {CLIColors.INFO}{db_name}{CLIColors.RESET}")
+        CLIColors.p(f"  📚 特征库: {CLIColors.LCYAN}{db_name}{CLIColors.RESET}")
         force_rebuild = self.args.get("rebuild", False)
+        
+        if force_rebuild:
+            CLIColors.p(f"  🔨 强制重建模式开启{CLIColors.RESET}")
+        
+        CLIColors.p("")
+        
         self.db, _ = get_or_build_database(
             db_name, force_rebuild=force_rebuild,
             log_fn=self._log,
             progress_fn=lambda cur, tot, elapsed=0, lbl="": self._progress(cur, tot, elapsed, lbl)
         )
+        
+        CLIColors.p("")  # 换行
         if not self.db:
             self._log("特征库为空，请检查 ./data 文件夹或添加角色图片", "error")
             sys.exit(1)
-        CLIColors.p(f"  已加载 {CLIColors.SUCCESS}{len(self.db)}{CLIColors.RESET} "
-                    f"个角色特征{CLIColors.MUTED}，就绪~{CLIColors.RESET}")
+        
+        CLIColors.p(f"\n  {CLIColors.SUCCESS}✨ 已加载 {len(self.db)} 个角色特征，就绪~ ✨{CLIColors.RESET}")
 
         # 步骤 3: 执行识别
         source = self.args.get("source")
@@ -1399,8 +1352,8 @@ class MoeFaceCLI:
                 self._run_image(source)
             elif suffix in VIDEO_EXTS:
                 self._header("③ 识别视频")
-                self._log(f"输入: {source}")
-                self._log(f"输出: {output or '仅预览（无保存）'}")
+                self._log(f"📹 输入: {source}")
+                self._log(f"💾 输出: {output or '仅预览（无保存）'}")
                 self._run_video(source, output)
             else:
                 self._log(f"不支持的文件格式: {suffix}", "error")
@@ -1415,7 +1368,7 @@ class MoeFaceCLI:
 
     def _run_image(self, path: str):
         """识别单张图片"""
-        self._log(f"文件: {CLIColors.INFO}{path}{CLIColors.RESET}")
+        self._log(f"📸 文件: {CLIColors.LCYAN}{path}{CLIColors.RESET}")
         threshold    = self.args.get("threshold", 0.45)
         min_neighbors = self.args.get("min_neighbors", 3)
 
@@ -1453,7 +1406,6 @@ class MoeFaceCLI:
                 self.stats["found_names"][name] = \
                     self.stats["found_names"].get(name, 0) + 1
 
-        # 保存结果图
         output = self.args.get("output")
         if output and results:
             draw = img.copy()
@@ -1488,8 +1440,8 @@ class MoeFaceCLI:
         h     = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        self._log(f"视频: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
-        CLIColors.p("")  # 换行，开始进度条
+        self._log(f"🎬 视频: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
+        CLIColors.p("")
 
         out = tmp_out = None
         if output_path:
@@ -1514,8 +1466,7 @@ class MoeFaceCLI:
                 self.stats["total_frames"] += 1
 
                 if total > 0:
-                    self._progress(frame_idx, total,
-                                   f"帧 {frame_idx}/{total}")
+                    self._progress(frame_idx, total, 0, f"帧 {frame_idx}/{total}")
 
                 if frame_idx % skip_frames == 0:
                     gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -1551,7 +1502,7 @@ class MoeFaceCLI:
                 out.release()
 
         CLIColors.clear_line()
-        CLIColors.p(f"  {CLIColors.SUCCESS}✓ 处理完成{CLIColors.RESET}："
+        CLIColors.p(f"\n  {CLIColors.SUCCESS}✓ 处理完成{CLIColors.RESET}："
                     f" {frame_idx} 帧，识别了 {self.stats['processed']} 个关键帧")
 
         if output_path and tmp_out and os.path.exists(tmp_out):
@@ -1571,7 +1522,7 @@ class MoeFaceCLI:
             self._log(f"无法打开摄像头 {camera_id}喵~", "error")
             return
 
-        self._log(f"摄像头 {camera_id} 已启动，按 Q 退出")
+        self._log(f"📷 摄像头 {camera_id} 已启动，按 Q 退出")
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         delay_ms = max(int(1000 / fps), 1)
 
@@ -1616,22 +1567,21 @@ class MoeFaceCLI:
 
         CLIColors.p("")
         self._header("④ 识别报告")
-        CLIColors.p(f"  总帧数: {CLIColors.INFO}{self.stats['total_frames']}"
-                    f"{CLIColors.RESET}，"
-                    f"关键帧: {CLIColors.INFO}{self.stats['processed']}"
-                    f"{CLIColors.RESET}，"
-                    f"识别次数: {CLIColors.SUCCESS}"
-                    f"{sum(self.stats['found_names'].values())}"
-                    f"{CLIColors.RESET}")
-        CLIColors.p(f"  角色分布:")
+        CLIColors.p(f"  📊 总帧数: {CLIColors.LCYAN}{self.stats['total_frames']}{CLIColors.RESET}，"
+                    f"关键帧: {CLIColors.LCYAN}{self.stats['processed']}{CLIColors.RESET}，"
+                    f"识别次数: {CLIColors.SUCCESS}{sum(self.stats['found_names'].values())}{CLIColors.RESET}")
+        CLIColors.p(f"  🎭 角色分布:")
         sorted_names = sorted(self.stats["found_names"].items(),
                              key=lambda x: x[1], reverse=True)
+        max_name_len = max(len(name) for name, _ in sorted_names) if sorted_names else 0
         for name, count in sorted_names:
             pct = count / sum(self.stats["found_names"].values()) * 100
-            bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
-            CLIColors.p(f"  {CLIColors.SUCCESS}{name:<15}{CLIColors.RESET}"
-                        f" {bar} {CLIColors.MUTED}{count} 次 ({pct:4.1f}%)"
-                        f"{CLIColors.RESET}")
+            bar_width = 30
+            bar_len = int(bar_width * pct / 100)
+            bar = "█" * bar_len + "░" * (bar_width - bar_len)
+            CLIColors.p(f"  {CLIColors.SUCCESS}{name:<{max_name_len}}{CLIColors.RESET}"
+                        f" {CLIColors.LGREEN}{bar}{CLIColors.RESET} "
+                        f"{CLIColors.LYELLOW}{count} 次 ({pct:5.1f}%){CLIColors.RESET}")
         CLIColors.p("")
         self._log("识别完成~ 主人再见喵！(｡•́︿•̀｡)", "done")
 
@@ -1639,20 +1589,21 @@ class MoeFaceCLI:
         """打印帮助"""
         print(f"""
 {CLIColors.TITLE}用法:{CLIColors.RESET}
-  {CLIColors.CYAN}python recognize.py --mode cli --source <文件>{CLIColors.RESET}
-  {CLIColors.CYAN}python recognize.py --mode gui{CLIColors.RESET}
+  {CLIColors.LCYAN}python recognize.py --mode cli --source <文件>{CLIColors.RESET}
+  {CLIColors.LCYAN}python recognize.py --mode gui{CLIColors.RESET}
 
 {CLIColors.TITLE}CLI 参数:{CLIColors.RESET}
-  {CLIColors.LGREEN}--mode{CLIColors.RESET}         运行模式: gui / cli (默认: cli)
+  {CLIColors.LGREEN}--mode{CLIColors.RESET}         运行模式: gui / cli (默认: gui)
   {CLIColors.LGREEN}--source{CLIColors.RESET}       视频或图片路径
   {CLIColors.LGREEN}--camera{CLIColors.RESET}       启用摄像头模式
   {CLIColors.LGREEN}--camera-id{CLIColors.RESET}    摄像头 ID (默认: 0)
-  {CLIColors.LGREEN}--output{CLIColors.RESET}        输出视频/图片路径
-  {CLIColors.LGREEN}--db-name{CLIColors.RESET}       特征库名称 (默认: 全部特征库)
-  {CLIColors.LGREEN}--threshold{CLIColors.RESET}     识别阈值 0.1~0.95 (默认: 0.45)
-  {CLIColors.LGREEN}--skip-frames{CLIColors.RESET}   视频跳帧数 (默认: 2)
-  {CLIColors.LGREEN}--min-neighbors{CLIColors.RESET} 检测灵敏度 1~10 (默认: 3)
-  {CLIColors.LGREEN}--rebuild{CLIColors.RESET}         强制重建特征库
+  {CLIColors.LGREEN}--output{CLIColors.RESET}       输出视频/图片路径
+  {CLIColors.LGREEN}--db-name{CLIColors.RESET}      特征库名称 (默认: 全部特征库)
+  {CLIColors.LGREEN}--threshold{CLIColors.RESET}    识别阈值 0.1~0.95 (默认: 0.45)
+  {CLIColors.LGREEN}--skip-frames{CLIColors.RESET}  视频跳帧数 (默认: 2)
+  {CLIColors.LGREEN}--min-neighbors{CLIColors.RESET}检测灵敏度 1~10 (默认: 3)
+  {CLIColors.LGREEN}--rebuild{CLIColors.RESET}      强制重建特征库
+  {CLIColors.LGREEN}--list{CLIColors.RESET}         列出所有可用特征库
 
 {CLIColors.TITLE}示例:{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --output out.mp4{CLIColors.RESET}
@@ -1679,7 +1630,6 @@ def _parse_args():
         help="运行模式: gui=图形界面(默认), cli=终端界面"
     )
 
-    # 文件/流输入
     parser.add_argument(
         "--source", "-s",
         help="视频或图片文件路径（支持 JPG/PNG/MP4/AVI/MKV 等）"
@@ -1696,7 +1646,6 @@ def _parse_args():
         help="摄像头设备 ID（默认: 0）"
     )
 
-    # 输出
     parser.add_argument(
         "--output", "-o",
         help="输出视频/图片路径（默认: 仅预览）"
@@ -1707,7 +1656,6 @@ def _parse_args():
         help="特征库名称（默认: 全部特征库）"
     )
 
-    # 识别参数
     parser.add_argument(
         "--threshold", "-t",
         type=float,
@@ -1742,9 +1690,11 @@ def _parse_args():
 
 # ── 入口 ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # 预先导入 cv2 用于线程本地存储
+    import cv2
+    
     args = _parse_args()
 
-    # 列出特征库
     if args.list:
         print(f"\n{CLIColors.TITLE}可用特征库:{CLIColors.RESET}")
         db_names = sorted(scan_role_folders())
@@ -1754,7 +1704,6 @@ if __name__ == "__main__":
         print("")
         sys.exit(0)
 
-    # 启动对应模式
     if args.mode == "gui":
         app = MoeFaceApp()
         app.run()
