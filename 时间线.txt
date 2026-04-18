@@ -1,9 +1,8 @@
 从2026年3月12日开始
 
 2026年3月12日 - add monika sayori natsuki(未作审查)
-"""
 
- G:\EmoScan Pro\MoeFace\data 的目录
+G:\EmoScan Pro\MoeFace\data 的目录
 
 2026/03/12  20:59    <DIR>          .
 2026/03/12  20:59    <DIR>          ..
@@ -21,8 +20,6 @@
                0 个文件              0 字节
               13 个目录 200,668,356,608 可用字节
 
-G:\EmoScan Pro\MoeFace\data>
-'''
 
 2026年4月12日 - add
 
@@ -35,4 +32,9 @@ Kobe Bryant
 重音teto
 
 
+2026年4月18日 - 整理 warma 数据库
 
+- 删除：二创图、真人照、无人脸的照片、面包相关图片
+- 新增：170 张高质量图片（爬虫 Bing + 百度，过滤后保留）
+- 当前 warma 角色图片总数：209 张
+- 仓库路径：G:/EmoScan Pro/MoeFace/data/warma
