@@ -41,6 +41,43 @@ ROLE_SUFFIXES = {
     "Ayachi_Nene": ["立绘","壁纸","綾地寧々","Nene Ayachi","桌角战士"]
 }
 
+# ======================== 加载负面词列表 ========================
+NEGATIVE_WORDS_FILE = "./cname/pachong.json"
+negative_words = []
+
+def load_negative_words():
+    """从JSON文件加载负面词列表，返回字符串列表"""
+    global negative_words
+    if not os.path.exists(NEGATIVE_WORDS_FILE):
+        log(f"警告: 负面词文件 {NEGATIVE_WORDS_FILE} 不存在，将不进行内容过滤")
+        return []
+    try:
+        with open(NEGATIVE_WORDS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            words = data
+        elif isinstance(data, dict) and 'words' in data:
+            words = data['words']
+        else:
+            words = []
+        # 统一转为小写，便于匹配
+        negative_words = [str(w).lower() for w in words if w]
+        log(f"已加载 {len(negative_words)} 个负面词")
+        return negative_words
+    except Exception as e:
+        log(f"加载负面词文件失败: {e}")
+        return []
+
+def contains_negative_word(text):
+    """检查文本中是否包含任意负面词（不区分大小写）"""
+    if not negative_words:
+        return False
+    lower_text = text.lower()
+    return any(word in lower_text for word in negative_words)
+
+# 程序启动时加载负面词
+load_negative_words()
+
 # ======================== 图源函数（增加超时和日志） ========================
 def log(msg):
     """带时间戳的日志"""
@@ -238,13 +275,24 @@ def collect_urls_from_sources(keyword, target_num, suffixes):
             need = target_num - len(all_urls)
             log(f"  使用图源 {src_name} 获取最多 {need*2} 个URL...")
             urls = getter(kw, need * 2) if need > 0 else []
-            new_urls = [u for u in urls if u not in all_urls]
+            # 过滤包含负面词的URL
+            filtered_urls = []
+            for u in urls:
+                if contains_negative_word(u):
+                    log(f"    负面词过滤跳过URL: {u[:80]}...")
+                elif u not in all_urls:
+                    filtered_urls.append(u)
+            new_urls = filtered_urls
             all_urls.extend(new_urls)
-            log(f"    {src_name} 新增 {len(new_urls)} 个URL，累计 {len(all_urls)}")
+            log(f"    {src_name} 新增 {len(new_urls)} 个URL（共获得{len(urls)}，过滤掉{len(urls)-len(new_urls)}个），累计 {len(all_urls)}")
             time.sleep(0.2)
     return all_urls[:target_num]
 
 def download_image(url, dir_path, base_name):
+    # 下载前再次检查负面词（双重保险）
+    if contains_negative_word(url):
+        log(f"下载跳过（负面词）: {url[:80]}...")
+        return False
     try:
         resp = requests.get(url, headers=HEADERS, timeout=(5, 15), stream=True)
         if resp.status_code != 200:
@@ -328,7 +376,7 @@ def crawl_all_roles(root_dir, max_images_per_role):
         suffixes = ROLE_SUFFIXES.get(role_name, ["立绘","壁纸","art","fanart","illustration"])
         print(f"  搜索关键词: {role_name}, 后缀: {suffixes}")
         urls = collect_urls_from_sources(role_name, max_images_per_role, suffixes)
-        print(f"共获取到 {len(urls)} 个有效URL")
+        print(f"共获取到 {len(urls)} 个有效URL（已过滤负面词）")
         
         if not urls:
             print("  没有获取到任何URL，跳过下载")
