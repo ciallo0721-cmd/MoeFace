@@ -41,6 +41,11 @@ ROLE_SUFFIXES = {
     "Ayachi_Nene": ["立绘","壁纸","綾地寧々","Nene Ayachi","桌角战士"]
 }
 
+# ======================== 日志函数（必须定义在使用之前） ========================
+def log(msg):
+    """带时间戳的日志"""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
 # ======================== 加载负面词列表 ========================
 NEGATIVE_WORDS_FILE = "./cname/pachong.json"
 negative_words = []
@@ -64,6 +69,10 @@ def load_negative_words():
         negative_words = [str(w).lower() for w in words if w]
         log(f"已加载 {len(negative_words)} 个负面词")
         return negative_words
+    except json.JSONDecodeError as e:
+        log(f"负面词文件 JSON 格式错误: {e}")
+        log(f"请检查文件 {NEGATIVE_WORDS_FILE} 的格式，应为 ['词1', '词2'] 或 {{'words': ['词1', '词2']}}")
+        return []
     except Exception as e:
         log(f"加载负面词文件失败: {e}")
         return []
@@ -79,10 +88,6 @@ def contains_negative_word(text):
 load_negative_words()
 
 # ======================== 图源函数（增加超时和日志） ========================
-def log(msg):
-    """带时间戳的日志"""
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
-
 def get_bing_images(keyword, num):
     log(f"Bing 开始搜索: {keyword}")
     urls = []
