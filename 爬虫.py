@@ -20,7 +20,7 @@ REQUEST_TIMEOUT = (5, 10)          # (连接超时, 读取超时) 单位秒
 ENABLE_BING = True
 ENABLE_GOOGLE = True
 ENABLE_BAIDU = True
-ENABLE_PIXIV = True
+ENABLE_PIXIV = False
 ENABLE_SAFEBOORU = True
 
 PIXIV_COOKIE = ""
