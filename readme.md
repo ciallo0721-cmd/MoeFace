@@ -20,6 +20,7 @@
 - [故障排除](#故障排除)
 - [免责声明](#免责声明)
 - [更新时间线](#更新时间线)
+- [特别感谢](#特别感谢)
 
 ---
 
@@ -261,3 +262,8 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
 | 日期 | 版本 | 更新内容 |
 |------|------|----------|
 | 2026-04-12 | v3.0 | 发布 EXE 免安装版本，无需 Python 环境即可直接使用。下载地址：[Moeface.rar](https://github.com/ciallo0721-cmd/MoeFace/releases/download/v3.0/Moeface.rar) |
+| 2026-04-27 | v3.0 | 更新data |
+
+
+## 特别感谢 <a name="特别感谢"></a>
+- 感谢 [ciallo-M](https://github.com/ciallo-M)的star (项目的第一条star！) 
