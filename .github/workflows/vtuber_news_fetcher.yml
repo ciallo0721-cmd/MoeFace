@@ -26,6 +26,7 @@ jobs:
       - name: Fetch VTuber News
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # QQ邮箱 SMTP 配置
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}

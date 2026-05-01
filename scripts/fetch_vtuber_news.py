@@ -24,10 +24,11 @@ load_dotenv()
 
 # ========== 配置区 ==========
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+# QQ邮箱 SMTP 配置
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")    # QQ邮箱授权码，不是密码！
 TO_EMAIL = os.getenv("TO_EMAIL", "ciallo0721cmd@gmail.com")
 REPO_OWNER = "ciallo0721-cmd"
 REPO_NAME = "MoeFace"
@@ -242,24 +243,32 @@ def build_email_body(news: list, created_folders: list) -> str:
 
 
 def send_email(html_body: str, subject_extra: str = "") -> bool:
-    """发送邮件"""
+    """发送邮件（QQ邮箱 SMTP）"""
     if not SMTP_USER or not SMTP_PASS:
         print("[WARN] SMTP 未配置，跳过邮件发送")
         return False
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = Header(f"🔥 V圈日报 {datetime.now().strftime('%m/%d')} {subject_extra}", "utf-8")
-        msg["From"] = SMTP_USER
+        msg["From"] = Header(f"VTuber监控机器人 <{SMTP_USER}>", "utf-8")
         msg["To"] = TO_EMAIL
         msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.ehlo()
+        # QQ邮箱：使用 TLS 587 端口
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.ehlo("VTuberBot")
             server.starttls()
+            server.ehlo("VTuberBot")
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_USER, TO_EMAIL, msg.as_string())
         print(f"[OK] 邮件已发送至 {TO_EMAIL}")
         return True
+    except smtplib.SMTPAuthError:
+        print("[ERROR] QQ邮箱授权码错误，请检查 SMTP_PASS 是否填入了正确的授权码")
+        return False
+    except smtplib.SMTPRecipientsRefused:
+        print(f"[ERROR] 收件人地址被拒绝: {TO_EMAIL}")
+        return False
     except Exception as e:
         print(f"[ERROR] 邮件发送失败: {e}")
         return False
