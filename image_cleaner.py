@@ -3,14 +3,15 @@
 """
 图片分辨率分类清理工具
 按分辨率分组显示图片，每次显示2张，可选择保留或删除
+支持两种扫描模式：单文件夹模式（不遍历子文件夹）或递归模式（遍历所有子文件夹）
 """
 
 import os
 import shutil
 from pathlib import Path
 from collections import defaultdict
-from tkinter import Tk, ttk, filedialog, messagebox, StringVar, IntVar
-from tkinter import Label, Button, Frame, Canvas, Scrollbar
+from tkinter import Tk, ttk, filedialog, messagebox, StringVar, IntVar, BooleanVar
+from tkinter import Label, Button, Frame, Canvas, Scrollbar, Checkbutton
 from PIL import Image, ImageTk
 import threading
 
@@ -22,6 +23,7 @@ class ImageCleanerApp:
         self.root.geometry("1200x800")
 
         self.data_dir = Path("data")  # 使用实例变量，方便修改
+        self.recursive_mode = BooleanVar(value=False)  # 递归遍历模式，默认关闭
         self.resolution_groups = defaultdict(list)
         self.sorted_resolutions = []
         self.current_res_index = 0
@@ -72,13 +74,22 @@ class ImageCleanerApp:
         Label(right_frame, textvariable=self.right_info_var, font=("微软雅黑", 9), bg="#1a1a1a", fg="white").pack(pady=5)
 
         # 底部操作栏
-        bottom_frame = Frame(self.root, bg="#f0f0f0", height=80)
+        bottom_frame = Frame(self.root, bg="#f0f0f0", height=100)
         bottom_frame.pack(fill="x", padx=10, pady=5)
         bottom_frame.pack_propagate(False)
 
+        # 模式选择区域
+        mode_frame = Frame(bottom_frame, bg="#f0f0f0")
+        mode_frame.pack(side="top", pady=5)
+
+        Checkbutton(mode_frame, text="递归遍历子文件夹（扫描所有子目录）", 
+                   variable=self.recursive_mode, 
+                   command=self.toggle_mode,
+                   font=("微软雅黑", 10), bg="#f0f0f0").pack(side="left", padx=10)
+
         # 进度标签
         self.progress_var = StringVar(value="")
-        Label(bottom_frame, textvariable=self.progress_var, font=("微软雅黑", 10), bg="#f0f0f0").pack(side="top", pady=5)
+        Label(bottom_frame, textvariable=self.progress_var, font=("微软雅黑", 10), bg="#f0f0f0").pack(side="top", pady=2)
 
         # 按钮区域
         btn_frame = Frame(bottom_frame, bg="#f0f0f0")
@@ -93,8 +104,25 @@ class ImageCleanerApp:
         Button(btn_frame, text="📁 选择数据目录", command=self.choose_directory, font=("微软雅黑", 10),
                width=15).pack(side="left", padx=20)
 
+        # 显示路径信息
+        self.path_var = StringVar(value=f"当前目录: {self.data_dir}")
+        Label(bottom_frame, textvariable=self.path_var, font=("微软雅黑", 8), bg="#f0f0f0", fg="gray").pack(side="bottom", pady=2)
+
+    def toggle_mode(self):
+        """切换扫描模式时重新扫描"""
+        # 显示提示
+        mode_name = "递归遍历所有子文件夹" if self.recursive_mode.get() else "单文件夹模式（不遍历子文件夹）"
+        if messagebox.askyesno("切换扫描模式", f"切换到 {mode_name} 吗？\n这将重新扫描当前目录下的所有图片。"):
+            self.thumbnail_cache.clear()
+            self.deleted_files.clear()
+            self.resolution_groups.clear()
+            self.sorted_resolutions.clear()
+            self.current_res_index = 0
+            self.current_img_index = 0
+            self.scan_images()
+
     def scan_images(self):
-        """扫描data目录下的所有图片，按分辨率分组"""
+        """扫描目录下的所有图片，按分辨率分组"""
         if not self.data_dir.exists():
             messagebox.showerror("错误", f"数据目录不存在: {self.data_dir}")
             return
@@ -106,18 +134,21 @@ class ImageCleanerApp:
             self.resolution_groups.clear()
             image_extensions = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'}
 
-            for folder in self.data_dir.iterdir():
-                if not folder.is_dir():
-                    continue
-                for img_path in folder.iterdir():
-                    if img_path.suffix.lower() in image_extensions:
-                        try:
-                            with Image.open(img_path) as img:
-                                width, height = img.size
-                                res_key = f"{width}x{height}"
-                                self.resolution_groups[res_key].append(str(img_path))
-                        except Exception as e:
-                            print(f"无法读取图片 {img_path}: {e}")
+            if self.recursive_mode.get():
+                # 递归模式：遍历所有子文件夹
+                for img_path in self.data_dir.rglob("*"):
+                    if img_path.is_file() and img_path.suffix.lower() in image_extensions:
+                        self._add_image_to_group(img_path)
+            else:
+                # 单文件夹模式：只扫描当前文件夹，不遍历子文件夹
+                for item in self.data_dir.iterdir():
+                    if item.is_file() and item.suffix.lower() in image_extensions:
+                        self._add_image_to_group(item)
+                    elif item.is_dir():
+                        # 单文件夹模式下，也扫描第一层子文件夹中的图片（保持原有行为）
+                        for img_path in item.iterdir():
+                            if img_path.is_file() and img_path.suffix.lower() in image_extensions:
+                                self._add_image_to_group(img_path)
 
             self.sorted_resolutions = sorted(self.resolution_groups.keys(),
                                             key=lambda x: int(x.split('x')[0]) * int(x.split('x')[1]),
@@ -129,10 +160,22 @@ class ImageCleanerApp:
 
             self.current_res_index = 0
             self.current_img_index = 0
-            self.info_var.set(f"扫描完成！共找到 {sum(len(v) for v in self.resolution_groups.values())} 张图片，{len(self.sorted_resolutions)} 种分辨率")
+            total_images = sum(len(v) for v in self.resolution_groups.values())
+            mode_text = "递归" if self.recursive_mode.get() else "单文件夹"
+            self.info_var.set(f"扫描完成！共找到 {total_images} 张图片，{len(self.sorted_resolutions)} 种分辨率 [{mode_text}模式]")
             self.show_current_group()
 
         threading.Thread(target=do_scan, daemon=True).start()
+
+    def _add_image_to_group(self, img_path):
+        """将单张图片添加到分辨率组"""
+        try:
+            with Image.open(img_path) as img:
+                width, height = img.size
+                res_key = f"{width}x{height}"
+                self.resolution_groups[res_key].append(str(img_path))
+        except Exception as e:
+            print(f"无法读取图片 {img_path}: {e}")
 
     def show_current_group(self):
         """显示当前分辨率组的2张图片"""
@@ -166,7 +209,8 @@ class ImageCleanerApp:
         # 更新进度
         group_num = self.current_res_index + 1
         total_groups = len(self.sorted_resolutions)
-        self.progress_var.set(f"分辨率组: {group_num}/{total_groups} | 当前组图片: {start+1}-{end}/{total_img}")
+        mode_text = "递归" if self.recursive_mode.get() else "单文件夹"
+        self.progress_var.set(f"[{mode_text}] 分辨率组: {group_num}/{total_groups} | 当前组图片: {start+1}-{end}/{total_img}")
 
     def show_image(self, img_path, label, info_var):
         """在Label中显示图片缩略图"""
@@ -187,7 +231,13 @@ class ImageCleanerApp:
             img_name = os.path.basename(img_path)
             if len(img_name) > 40:
                 img_name = img_name[:37] + "..."
-            info_var.set(f"{img_name}\n{os.path.dirname(img_path).split(os.sep)[-1]}")
+            # 获取相对路径或子文件夹名
+            try:
+                rel_path = Path(img_path).relative_to(self.data_dir)
+                folder_name = str(rel_path.parent) if rel_path.parent != Path('.') else "根目录"
+            except:
+                folder_name = os.path.dirname(img_path).split(os.sep)[-1]
+            info_var.set(f"{img_name}\n{folder_name}")
 
         except Exception as e:
             label.config(image="", text=f"加载失败\n{str(e)[:30]}")
@@ -226,9 +276,9 @@ class ImageCleanerApp:
         for img_path in images_to_delete:
             try:
                 # 从分辨率组中移除
-                res = self.sorted_resolutions[self.current_res_index]
-                if img_path in self.resolution_groups[res]:
-                    self.resolution_groups[res].remove(img_path)
+                res_key = self.sorted_resolutions[self.current_res_index]
+                if img_path in self.resolution_groups[res_key]:
+                    self.resolution_groups[res_key].remove(img_path)
                 # 删除文件
                 os.remove(img_path)
                 self.deleted_files.append(img_path)
@@ -237,16 +287,16 @@ class ImageCleanerApp:
                 messagebox.showerror("删除失败", f"无法删除 {img_path}\n{str(e)}")
 
         # 如果当前组没有图片了，移除这个分辨率组
-        res = self.sorted_resolutions[self.current_res_index]
-        if not self.resolution_groups[res]:
-            del self.resolution_groups[res]
+        res_key = self.sorted_resolutions[self.current_res_index]
+        if not self.resolution_groups[res_key]:
+            del self.resolution_groups[res_key]
             self.sorted_resolutions.pop(self.current_res_index)
             if self.current_res_index >= len(self.sorted_resolutions):
                 self.current_res_index = max(0, len(self.sorted_resolutions) - 1)
             self.current_img_index = 0
         else:
             # 调整当前图片索引
-            img_list = self.resolution_groups[res]
+            img_list = self.resolution_groups[res_key]
             if self.current_img_index >= len(img_list):
                 self.current_img_index = max(0, len(img_list) - 2)
 
@@ -308,6 +358,7 @@ class ImageCleanerApp:
         new_dir = filedialog.askdirectory(initialdir=str(self.data_dir.parent))
         if new_dir:
             self.data_dir = Path(new_dir)
+            self.path_var.set(f"当前目录: {self.data_dir}")
             self.thumbnail_cache.clear()
             self.deleted_files.clear()
             self.resolution_groups.clear()
