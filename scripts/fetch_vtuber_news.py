@@ -322,7 +322,7 @@ def generate_html(all_news: Dict[str, List[Dict]]) -> str:
         </style>
     </head>
     <body>
-        <h1>🎮 VTuber新闻汇总</h1>
+        <h1>VTuber新闻汇总</h1>
         <p>抓取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         <p>新闻总数: {total_news} 条</p>
     """
@@ -330,7 +330,7 @@ def generate_html(all_news: Dict[str, List[Dict]]) -> str:
     displayed_news = 0
     for source_name, news_list in all_news.items():
         if news_list:
-            html += f'<h2>📌 {source_name}</h2>'
+            html += f'<h2>{source_name}</h2>'
             for news in news_list:
                 displayed_news += 1
                 link = news.get('link', '')
@@ -353,7 +353,7 @@ def generate_html(all_news: Dict[str, List[Dict]]) -> str:
     html += f"""
         <div class="footer">
             <p>本邮件由 GitHub Actions 自动生成 | VTuber新闻订阅</p>
-            <p>📧 如有问题请联系管理员</p>
+        
         </div>
     </body>
     </html>
