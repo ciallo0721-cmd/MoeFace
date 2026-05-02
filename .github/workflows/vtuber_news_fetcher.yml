@@ -8,10 +8,14 @@ on:
 jobs:
   fetch-vtuber-news:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 也可保留，但用 PAT 后其实不需要
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}   # 👈 关键：使用你的 PAT 检出
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,7 +45,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
           git diff --cached --quiet || git commit -m "🤖 Auto: 新增VTuber角色文件夹 $(date +'%Y-%m-%d')"
-          git push https://${{ secrets.PAT_TOKEN }}@github.com/ciallo0721-cmd/MoeFace.git
+          git push origin HEAD   # 👈 现在直接用 origin，因为 checkout 时已经用了 PAT
+        # 不再需要手动拼接 https://token@...
 
       - name: Upload news report
         uses: actions/upload-artifact@v4
