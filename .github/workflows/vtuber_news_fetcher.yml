@@ -21,7 +21,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install requests feedparser beautifulsoup4 python-dotenv
+        run: |
+          pip install requests feedparser beautifulsoup4
+          echo "✅ 依赖安装完成"
 
       - name: Fetch VTuber News
         env:
