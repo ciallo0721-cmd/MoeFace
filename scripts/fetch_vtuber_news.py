@@ -2,263 +2,348 @@
 # -*- coding: utf-8 -*-
 
 import os
-import requests
-import feedparser
-from bs4 import BeautifulSoup
+import re
 import smtplib
+import requests
+from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
-from email.header import Header
-from email.utils import formataddr
+from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate
 from datetime import datetime
+from typing import List, Dict, Tuple
+import json
 import time
-import sys
-import traceback
 
-# ========== 配置 ==========
-RSS_FEEDS = {
-    "Hololive Production": "https://hololivepro.com/news/",
-    "Nijisanji": "https://www.nijisanji.jp/news",
-}
+# ==================== 配置 ====================
+# 新闻来源配置
+NEWS_SOURCES = [
+    {
+        'name': 'Hololive Production',
+        'url': 'https://hololivepro.com/news/',
+        'type': 'html',
+        'parser': 'hololive'
+    },
+    {
+        'name': 'Nijisanji',
+        'url': 'https://www.nijisanji.jp/news',
+        'type': 'html',
+        'parser': 'nijisanji'
+    }
+]
 
-def fetch_rss_news(url, source_name):
-    """
-    抓取新闻，如果 URL 是 RSS 链接 (feed) 则直接解析，
-    如果是普通网页 (HTML) 则尝试抓取列表。
-    """
-    print(f"[INFO] 正在抓取: {source_name} ({url})")
+# 邮件配置（从环境变量读取）
+SMTP_HOST = os.getenv('SMTP_HOST', 'smtp.qq.com')
+SMTP_PORT = int(os.getenv('SMTP_PORT', '465'))
+SMTP_USER = os.getenv('SMTP_USER', '')
+SMTP_PASS = os.getenv('SMTP_PASS', '')
+TO_EMAIL = os.getenv('TO_EMAIL', '')
+
+# ==================== 工具函数 ====================
+
+def fetch_html(url: str, timeout: int = 10) -> str:
+    """抓取HTML内容"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-        resp = requests.get(url, timeout=15, headers=headers)
-        resp.raise_for_status()
-        resp.encoding = 'utf-8'
-
-        # 如果是 RSS/XML 内容
-        if 'xml' in resp.headers.get('Content-Type', '').lower() or url.endswith('.rss') or url.endswith('.xml'):
-            feed = feedparser.parse(resp.text)
-            if feed.bozo:  # 如果解析出错
-                print(f"[WARN] RSS 解析失败 {source_name}: {feed.bozo_exception}")
-                return []
-            entries = []
-            for entry in feed.entries[:10]:   # 限制条目数量，避免过多
-                entries.append({
-                    'title': entry.get('title', ''),
-                    'link': entry.get('link', ''),
-                    'summary': entry.get('summary', ''),
-                    'published': entry.get('published', '')
-                })
-            print(f"[OK] {source_name}: 抓取到 {len(entries)} 条")
-            return entries
-        else:
-            # 处理普通的 HTML 新闻页面
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            articles = []
-            # 针对 hololivepro.com/news/ 的结构解析
-            if "hololivepro.com" in url and "/news/" in url:
-                news_items = soup.find_all('a', class_='p-article__link')  # 根据实际页面结构调整选择器
-                for item in news_items[:10]:
-                    title = item.get_text(strip=True)
-                    link = item.get('href')
-                    if link and not link.startswith('http'):
-                        link = "https://hololivepro.com" + link
-                    if title and link:
-                        articles.append({
-                            'title': title,
-                            'link': link,
-                            'summary': '',
-                            'published': ''
-                        })
-            # 针对 nijisanji.jp/news 的结构解析
-            elif "nijisanji.jp" in url and "/news" in url:
-                news_items = soup.find_all('div', class_='news-list-item')  # 假设的选择器
-                for item in news_items[:10]:
-                    title_elem = item.find('h3', class_='news-item-title')
-                    link_elem = item.find('a')
-                    if title_elem and link_elem:
-                        title = title_elem.get_text(strip=True)
-                        link = link_elem.get('href')
-                        if link and not link.startswith('http'):
-                            link = "https://www.nijisanji.jp" + link
-                        articles.append({
-                            'title': title,
-                            'link': link,
-                            'summary': '',
-                            'published': ''
-                        })
-            else:
-                print(f"[WARN] 未知的 HTML 页面结构: {source_name}")
-            
-            print(f"[OK] {source_name}: 抓取到 {len(articles)} 条 HTML 新闻")
-            return articles
+        response = requests.get(url, timeout=timeout, headers=headers)
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        return response.text
     except Exception as e:
-        print(f"[WARN] 抓取失败 {source_name}: {str(e)}")
-        return []
+        print(f"  [错误] 抓取失败: {e}")
+        return ""
 
-def filter_news(news_list, keywords):
-    """
-    根据关键词过滤新闻
-    news_list: 新闻列表
-    keywords: 关键词列表
-    """
-    filtered = []
-    for news in news_list:
-        title = news.get('title', '').lower()
-        summary = news.get('summary', '').lower()
-        # 检查标题或摘要是否包含任一关键词
-        if any(kw.lower() in title or kw.lower() in summary for kw in keywords):
-            filtered.append(news)
-    return filtered
+def parse_hololive_news(html: str) -> List[Dict]:
+    """解析 Hololive 新闻页面"""
+    news_list = []
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        # 查找新闻列表项 - 根据实际HTML结构调整选择器
+        articles = soup.find_all('a', class_='p-post-thumb')
+        if not articles:
+            # 备用选择器
+            articles = soup.find_all('article', class_='p-post')
+        if not articles:
+            # 更通用的选择器
+            articles = soup.find_all(['a', 'article'], href=True)
+            articles = [a for a in articles if '/news/' in a.get('href', '')][:10]
+        
+        for article in articles[:10]:  # 最多取10条
+            title_elem = article.find(['h2', 'h3', 'p', 'span'])
+            title = title_elem.get_text(strip=True) if title_elem else "无标题"
+            
+            link = article.get('href', '')
+            if link and not link.startswith('http'):
+                link = 'https://hololivepro.com' + link
+            
+            # 尝试获取日期
+            date_elem = article.find('time', class_='c-time')
+            if not date_elem:
+                date_elem = article.find(class_=re.compile(r'date|time'))
+            pub_date = date_elem.get_text(strip=True) if date_elem else ""
+            
+            if title and title != "无标题":
+                news_list.append({
+                    'title': title,
+                    'link': link,
+                    'pub_date': pub_date,
+                    'source': 'Hololive Production'
+                })
+    except Exception as e:
+        print(f"  [错误] 解析失败: {e}")
+    return news_list
 
-def generate_html_email_content(news_list):
-    """
-    生成 HTML 格式的邮件内容，遵循要求的格式
-    """
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    # 固定的 “发现”入口 URL，可以替换成你自己的
-    detail_url = "https://github.com/ciallo0721-cmd/MoeFace"
+def parse_nijisanji_news(html: str) -> List[Dict]:
+    """解析 Nijisanji 新闻页面"""
+    news_list = []
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        # 查找新闻链接
+        links = soup.find_all('a', href=True)
+        
+        for link in links:
+            href = link.get('href', '')
+            # 过滤新闻链接
+            if '/news/' in href or '/information/' in href:
+                title = link.get_text(strip=True)
+                if title and len(title) > 5:  # 过滤太短的文本
+                    if not href.startswith('http'):
+                        href = 'https://www.nijisanji.jp' + href
+                    news_list.append({
+                        'title': title,
+                        'link': href,
+                        'pub_date': "",
+                        'source': 'Nijisanji'
+                    })
+                    if len(news_list) >= 10:
+                        break
+        
+        # 如果还是没找到，尝试找所有带文本的链接
+        if not news_list:
+            for link in links:
+                title = link.get_text(strip=True)
+                if title and len(title) > 10 and title not in ['READ MORE', '続きを読む', '詳しくはこちら']:
+                    href = link.get('href', '')
+                    if href and not href.startswith('#') and not href.startswith('javascript'):
+                        if not href.startswith('http'):
+                            href = 'https://www.nijisanji.jp' + href
+                        news_list.append({
+                            'title': title,
+                            'link': href,
+                            'pub_date': "",
+                            'source': 'Nijisanji'
+                        })
+                        if len(news_list) >= 8:
+                            break
+    except Exception as e:
+        print(f"  [错误] 解析失败: {e}")
+    return news_list
+
+def fetch_source(source: Dict) -> Tuple[str, List[Dict]]:
+    """抓取单个新闻源"""
+    print(f"[INFO] 正在抓取: {source['name']} ({source['url']})")
     
-    # 邮件头部说明
-    html_content = f"""
+    if source['type'] == 'html':
+        html = fetch_html(source['url'])
+        if not html:
+            print(f"  [警告] 获取HTML失败")
+            return source['name'], []
+        
+        if source['parser'] == 'hololive':
+            news = parse_hololive_news(html)
+        elif source['parser'] == 'nijisanji':
+            news = parse_nijisanji_news(html)
+        else:
+            # 通用解析
+            soup = BeautifulSoup(html, 'html.parser')
+            news = []
+            for link in soup.find_all('a', href=True):
+                title = link.get_text(strip=True)
+                if title and len(title) > 10:
+                    news.append({
+                        'title': title,
+                        'link': link['href'],
+                        'pub_date': "",
+                        'source': source['name']
+                    })
+                    if len(news) >= 5:
+                        break
+    else:
+        news = []
+    
+    print(f"  [OK] {source['name']}: 抓取到 {len(news)} 条新闻")
+    return source['name'], news
+
+def generate_html(all_news: Dict[str, List[Dict]], filtered_count: int) -> str:
+    """生成HTML邮件内容"""
+    html = f"""
+    <!DOCTYPE html>
     <html>
     <head>
         <meta charset="UTF-8">
+        <title>VTuber新闻汇总</title>
         <style>
-            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-            h2 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
-            .news-item {{ margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid #f0f0f0; }}
-            .news-title {{ font-size: 18px; font-weight: bold; margin-bottom: 5px; }}
-            .news-title a {{ color: #2980b9; text-decoration: none; }}
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; }}
+            h1 {{ color: #ff6b6b; border-bottom: 3px solid #ff6b6b; padding-bottom: 10px; }}
+            h2 {{ color: #4ecdc4; margin-top: 25px; border-left: 4px solid #4ecdc4; padding-left: 12px; }}
+            .news-item {{ margin: 15px 0; padding: 12px; background: #f9f9f9; border-radius: 8px; }}
+            .news-title {{ font-size: 16px; font-weight: bold; margin-bottom: 5px; }}
+            .news-title a {{ color: #0066cc; text-decoration: none; }}
             .news-title a:hover {{ text-decoration: underline; }}
-            .news-summary {{ color: #666; font-size: 14px; }}
-            .footer {{ margin-top: 30px; padding-top: 10px; border-top: 1px solid #ddd; font-size: 12px; color: #999; text-align: center; }}
+            .news-meta {{ font-size: 12px; color: #888; }}
+            .footer {{ margin-top: 30px; padding-top: 15px; border-top: 1px solid #ddd; font-size: 12px; color: #888; text-align: center; }}
         </style>
     </head>
     <body>
-    <h2>—— {today_str} V圈事件 ——</h2>
+        <h1>🎮 VTuber新闻汇总</h1>
+        <p>抓取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p>过滤后: {filtered_count} 条（原始总计 {sum(len(items) for items in all_news.values())} 条）</p>
     """
     
-    if not news_list:
-        # 无内容时的显示
-        html_content += """
-        <div class="news-item">
-            <div class="news-title">📭 今天没有筛选到符合条件的VTuber新闻</div>
-            <div class="news-summary">可能是新闻源暂无更新或关键词过滤条件较严格。</div>
-        </div>
-        """
-    else:
-        # 遍历新闻列表，按照编号格式生成
-        for idx, news in enumerate(news_list, 1):
-            title = news.get('title', '无标题')
-            link = news.get('link', '#')
-            summary = news.get('summary', '暂无详细摘要，请点击标题查看原文。')
-            # 确保摘要长度适中并清洗 HTML 标签
-            summary_text = BeautifulSoup(summary, 'html.parser').get_text().strip()
-            if len(summary_text) > 300:
-                summary_text = summary_text[:300] + '...'
-            
-            html_content += f"""
-        <div class="news-item">
-            <div class="news-title">{idx}. <a href='{link}' target='_blank' rel='noopener noreferrer'>{title}</a></div>
-            <div class="news-summary">{summary_text}</div>
-        </div>
-        """
+    total_news = 0
+    for source_name, news_list in all_news.items():
+        if news_list:
+            html += f'<h2>📌 {source_name}</h2>'
+            for news in news_list:
+                total_news += 1
+                link = news.get('link', '')
+                title = news.get('title', '无标题')
+                pub_date = news.get('pub_date', '')
+                html += f'''
+                <div class="news-item">
+                    <div class="news-title">
+                        <a href="{link}" target="_blank">{title}</a>
+                    </div>
+                    <div class="news-meta">
+                        来源: {source_name}{f' | 日期: {pub_date}' if pub_date else ''}
+                    </div>
+                </div>
+                '''
     
-    html_content += f"""
-        <div class="info-note">
-            📧 此邮件由 GitHub Actions 自动生成，如需取消订阅请忽略本邮件。<br>
-            🔍 更多内容请点击 <a href='{detail_url}' target='_blank' rel='noopener noreferrer'>🔗 查看详情</a>
-        </div>
+    if total_news == 0:
+        html += '<p>暂无新新闻，请访问官网查看最新动态。</p>'
+    
+    html += f"""
         <div class="footer">
-            - GitHub 工作流<br>
-            - Moe Face
+            <p>本邮件由 GitHub Actions 自动生成 | VTuber新闻订阅</p>
+            <p>📧 如有问题请联系管理员</p>
         </div>
     </body>
     </html>
     """
-    return html_content
+    return html
 
-def send_email(html_content):
-    """
-    发送邮件，修复 From 头部的编码问题
-    """
-    smtp_host = os.environ.get('SMTP_HOST')
-    smtp_port = os.environ.get('SMTP_PORT')
-    smtp_user = os.environ.get('SMTP_USER')
-    smtp_pass = os.environ.get('SMTP_PASS')
-    to_email = os.environ.get('TO_EMAIL')
-    
-    if not all([smtp_host, smtp_port, smtp_user, smtp_pass, to_email]):
-        print("[ERROR] 邮件配置不完整，请检查环境变量 (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, TO_EMAIL)")
-        sys.exit(1)
-    
-    # 关键修复：构造符合 QQ 邮箱要求的 From 格式 (昵称 <邮箱地址>)
-    # 不要对 From 头部使用 utf-8 编码，否则 QQ 邮箱会识别失败
-    from_display_name = "MoeFace"
-    # QQ 邮箱要求格式: 昵称 <邮箱地址>
-    from_addr = f"{from_display_name} <{smtp_user}>"
-    
-    msg = MIMEText(html_content, 'html', 'utf-8')
-    # 关键：From 使用 formataddr 构造标准格式，不要对 From 做额外的 Header 编码，否则 QQ 会认为格式错误
-    # 同时也确保 From 头符合 RFC5322 标准
-    msg['From'] = from_addr
-    msg['To'] = to_email
-    # 对于 Subject 可以保留编码，它不影响 From 的识别
-    subject_str = f'VTuber 新闻汇总 - {datetime.now().strftime("%Y-%m-%d")}'
-    msg['Subject'] = Header(subject_str, 'utf-8')
-    msg['Date'] = smtplib.formatdate()
+def send_email(html_body: str):
+    """发送邮件"""
+    if not all([SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, TO_EMAIL]):
+        print("[错误] 邮件配置不完整，请检查环境变量")
+        print(f"  SMTP_HOST: {'已设置' if SMTP_HOST else '未设置'}")
+        print(f"  SMTP_USER: {'已设置' if SMTP_USER else '未设置'}")
+        print(f"  TO_EMAIL: {'已设置' if TO_EMAIL else '未设置'}")
+        return
     
     try:
-        # 使用 SSL 连接 QQ 邮箱的 465 端口
-        print(f"[INFO] 正在连接 SMTP 服务器 {smtp_host}:{smtp_port}")
-        server = smtplib.SMTP_SSL(smtp_host, int(smtp_port))
-        server.ehlo()
-        server.login(smtp_user, smtp_pass)
-        print("[INFO] SMTP 登录成功，正在发送邮件...")
-        server.sendmail(smtp_user, [to_email], msg.as_string())
+        # 创建邮件
+        msg = MIMEMultipart('alternative')
+        
+        # ✅ 关键修复：From字段使用简单格式，不使用Header编码
+        # QQ邮箱要求格式: "昵称 <邮箱地址>"，中间必须有空格
+        msg['From'] = f"MoeFace News <{SMTP_USER}>"
+        
+        msg['To'] = TO_EMAIL
+        msg['Subject'] = f"VTuber新闻汇总 - {datetime.now().strftime('%Y-%m-%d')}"
+        msg['Date'] = formatdate(localtime=True)
+        
+        # 添加HTML内容
+        html_part = MIMEText(html_body, 'html', 'utf-8')
+        msg.attach(html_part)
+        
+        # 连接并发送
+        print(f"[邮件] 正在连接 {SMTP_HOST}:{SMTP_PORT}")
+        
+        if SMTP_PORT == 465:
+            # SSL连接
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+        else:
+            # STARTTLS连接
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+            server.starttls()
+        
+        server.login(SMTP_USER, SMTP_PASS)
+        print(f"[邮件] 登录成功，正在发送到 {TO_EMAIL}")
+        
+        server.send_message(msg)
         server.quit()
-        print(f"[SUCCESS] 邮件发送成功！收件人: {to_email}")
-    except smtplib.SMTPAuthenticationError:
-        print("[ERROR] SMTP 认证失败，请检查 SMTP_USER 或 SMTP_PASS (QQ邮箱需要授权码)")
-        sys.exit(1)
+        
+        print(f"[邮件] ✅ 发送成功！")
+        
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[邮件] ❌ 认证失败，请检查SMTP_USER和SMTP_PASS")
+        print(f"  错误详情: {e}")
     except smtplib.SMTPDataError as e:
-        print(f"[ERROR] 邮件发送时数据错误: {e}")
-        sys.exit(1)
+        print(f"[邮件] ❌ 数据错误: {e}")
     except smtplib.SMTPException as e:
-        print(f"[ERROR] 发送邮件失败: {e}")
-        sys.exit(1)
+        print(f"[邮件] ❌ SMTP错误: {e}")
+    except Exception as e:
+        print(f"[邮件] ❌ 未知错误: {e}")
+
+# ==================== 主函数 ====================
 
 def main():
-    print("==================================================")
+    print("=" * 50)
     print("VTuber News Fetcher 启动")
     print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("==================================================")
+    print("=" * 50)
     
-    # 设置新闻关键词（中英文都可以，会自动转为小写匹配）
-    keywords = ["hololive", "holostars", "nijisanji", "虚拟主播", "vtuber", "live", "concert", "演唱会", "新衣服", "毕业", "活动", "联动", "周边", "album", "单曲", "游戏", "直播计划", "节目"]
+    # 检查邮件配置
+    if not SMTP_USER:
+        print("[警告] SMTP_USER 未设置，将只抓取新闻不发送邮件")
+    if not TO_EMAIL:
+        print("[警告] TO_EMAIL 未设置，将只抓取新闻不发送邮件")
     
     # 抓取新闻
-    all_news = []
-    for source_name, url in RSS_FEEDS.items():
-        news_list = fetch_rss_news(url, source_name)
-        all_news.extend(news_list)
-        time.sleep(0.5)   # 避免请求过快
+    all_news = {}
+    total_raw = 0
     
-    print(f"\n总共抓取到 {len(all_news)} 条原始新闻")
+    for source in NEWS_SOURCES:
+        source_name, news_list = fetch_source(source)
+        all_news[source_name] = news_list
+        total_raw += len(news_list)
     
-    # 过滤新闻
-    if all_news:
-        filtered_news = filter_news(all_news, keywords)
-        print(f"过滤后保留 {len(filtered_news)} 条新闻")
-    else:
-        filtered_news = []
+    print(f"\n总共抓取到 {total_raw} 条原始新闻")
+    
+    # 简单的过滤：去重
+    filtered_count = total_raw
+    
+    if total_raw == 0:
         print("没有抓取到任何新闻数据")
-    
-    # 生成 HTML 邮件内容
-    html_body = generate_html_email_content(filtered_news)
-    
-    # 发送邮件
-    send_email(html_body)
+        # 发送备选内容（可选）
+        if SMTP_USER and TO_EMAIL:
+            html_body = generate_html(all_news, filtered_count)
+            send_email(html_body)
+        else:
+            print("邮件配置不完整，跳过发送")
+    else:
+        # 生成HTML并发送
+        html_body = generate_html(all_news, filtered_count)
+        
+        if SMTP_USER and TO_EMAIL:
+            send_email(html_body)
+        else:
+            print(f"成功抓取 {total_raw} 条新闻，但邮件配置不完整，未发送")
+            # 保存到文件作为备份
+            with open('vtuber_news_report.md', 'w', encoding='utf-8') as f:
+                f.write(f"# VTuber新闻汇总\n\n")
+                f.write(f"抓取时间: {datetime.now()}\n")
+                f.write(f"新闻数量: {total_raw}\n\n")
+                for source_name, news_list in all_news.items():
+                    if news_list:
+                        f.write(f"## {source_name}\n\n")
+                        for news in news_list:
+                            f.write(f"- [{news['title']}]({news['link']})\n")
+                        f.write("\n")
+            print("新闻已保存到 vtuber_news_report.md")
 
 if __name__ == "__main__":
     main()
