@@ -2,9 +2,10 @@ name: VTuber News Fetcher
 
 on:
   schedule:
-    # 每天 UTC 0:00（北京时间 8:00）运行
+    # 每天早上 8:00（北京时间 = UTC 0:00）运行
     - cron: '0 0 * * *'
   workflow_dispatch:
+    # 也支持手动触发，方便测试
 
 jobs:
   fetch-vtuber-news:
@@ -22,17 +23,31 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests feedparser beautifulsoup4
+          echo "✅ 依赖安装完成"
 
       - name: Fetch VTuber News
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # QQ邮箱 SMTP 配置
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          # B站 Cookie（用于绕过风控抓取动态）
+          BILI_COOKIE: ${{ secrets.BILI_COOKIE }}
         run: python scripts/fetch_vtuber_news.py
+        working-directory: .
 
-      - name: Upload report (optional)
+      - name: Commit new VTuber folders
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "🤖 Auto: 新增VTuber角色文件夹 $(date +'%Y-%m-%d')"
+          git push
+
+      - name: Upload news report
         uses: actions/upload-artifact@v4
         with:
           name: vtuber-news-report
