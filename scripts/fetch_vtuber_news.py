@@ -7,6 +7,8 @@ import smtplib
 import requests
 import json
 import time
+import hashlib
+import urllib.parse
 from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -32,12 +34,10 @@ NEWS_SOURCES = [
     }
 ]
 
-# 国产 VTuber B站 UID 列表（请替换为你关注的 VTuber UID）
-# 获取方式：打开 VTuber 的 B站空间主页，URL 中的数字即为 UID
-# 例如：https://space.bilibili.com/12345678 → UID 为 12345678
+# 国产 VTuber B站 UID 列表
 BILIBILI_UIDS = [
-    '33064694',    # 请替换为实际 VTuber 的 UID
-    '1265680561',  # 请替换为实际 VTuber 的 UID
+    '33064694',
+    '1265680561',
 ]
 
 # 邮件配置（从环境变量读取）
@@ -46,11 +46,87 @@ SMTP_PORT = int(os.getenv('SMTP_PORT', '465'))
 SMTP_USER = os.getenv('SMTP_USER', '')
 SMTP_PASS = os.getenv('SMTP_PASS', '')
 TO_EMAIL = os.getenv('TO_EMAIL', '')
+BILI_COOKIE = os.getenv('BILI_COOKIE', '')  # 从 Secrets 读取 B站 Cookie
 
 # User-Agent 伪装
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://www.bilibili.com/',
+    'Origin': 'https://www.bilibili.com',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Connection': 'keep-alive',
 }
+
+# 如果有 Cookie 就添加到 Headers 中
+if BILI_COOKIE:
+    HEADERS['Cookie'] = BILI_COOKIE
+    print("[配置] ✅ B站 Cookie 已加载")
+else:
+    print("[配置] ⚠️ B站 Cookie 未配置，可能无法获取动态")
+
+# ==================== WBI 签名 ====================
+# WBI 签名所需的混合表
+MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+]
+
+def get_wbi_keys() -> Tuple[str, str]:
+    """获取 WBI 签名所需的 img_key 和 sub_key"""
+    try:
+        url = 'https://api.bilibili.com/x/web-interface/nav'
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        data = response.json()
+        
+        if data.get('code') != 0:
+            print(f"  [WBI] 获取 keys 失败: {data.get('message')}")
+            return '', ''
+        
+        wbi_img_url = data['data']['wbi_img']['img_url']
+        wbi_sub_url = data['data']['wbi_img']['sub_url']
+        
+        img_key = wbi_img_url.rsplit('/', 1)[-1].split('.')[0]
+        sub_key = wbi_sub_url.rsplit('/', 1)[-1].split('.')[0]
+        
+        return img_key, sub_key
+    except Exception as e:
+        print(f"  [WBI] 获取 keys 异常: {e}")
+        return '', ''
+
+def encrypt_wbi(params: dict, img_key: str, sub_key: str) -> dict:
+    """对参数进行 WBI 签名"""
+    # 1. 混合 key
+    mixin_key = ''
+    for i in range(64):
+        mixin_key += (img_key + sub_key)[MIXIN_KEY_ENC_TAB[i]]
+    mixin_key = mixin_key[:32]
+    
+    # 2. 添加时间戳
+    params['wts'] = int(time.time())
+    
+    # 3. 按键名排序
+    sorted_params = sorted(params.items())
+    
+    # 4. 拼接字符串
+    query = urllib.parse.urlencode(sorted_params)
+    sign_str = query + mixin_key
+    
+    # 5. 计算 w_rid
+    params['w_rid'] = hashlib.md5(sign_str.encode()).hexdigest()
+    
+    return params
+
+def sign_request(url: str, params: dict) -> Tuple[str, dict]:
+    """为请求添加 WBI 签名"""
+    img_key, sub_key = get_wbi_keys()
+    if not img_key or not sub_key:
+        return url, params
+    
+    signed_params = encrypt_wbi(params.copy(), img_key, sub_key)
+    return url, signed_params
 
 # ==================== 工具函数 ====================
 
@@ -65,10 +141,14 @@ def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
         print(f"  [错误] 抓取失败 {url}: {e}")
         return None
 
-def fetch_json(url: str, timeout: int = 15) -> Optional[dict]:
-    """抓取 JSON 数据"""
+def fetch_json(url: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
+    """抓取 JSON 数据，自动添加 WBI 签名"""
     try:
-        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        if params is None:
+            params = {}
+        # 为请求添加 WBI 签名
+        signed_url, signed_params = sign_request(url, params)
+        response = requests.get(signed_url, params=signed_params, headers=HEADERS, timeout=timeout)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
@@ -78,30 +158,21 @@ def fetch_json(url: str, timeout: int = 15) -> Optional[dict]:
 # ==================== Hololive 解析 ====================
 
 def parse_hololive_news(html: str) -> List[Dict]:
-    """
-    解析 Hololive 新闻页面
-    基于官方 HTML 结构：日期用 <time> 标签，标题在紧随其后的 <a> 或 <h2> 中
-    """
+    """解析 Hololive 新闻页面"""
     news_list = []
     try:
         soup = BeautifulSoup(html, 'html.parser')
-        
-        # 查找所有新闻条目容器
         articles = soup.find_all('div', class_=re.compile(r'news|post|article|entry', re.I))
         
-        # 备用：直接找带有日期和标题的结构
         if not articles or len(articles) < 2:
             articles = soup.find_all(['li', 'div'], class_=True)
         
         for article in articles[:15]:
             # 查找日期
-            date_elem = None
-            # 优先找 <time> 标签
             date_elem = article.find('time')
             if not date_elem:
                 date_elem = article.find(class_=re.compile(r'date|time', re.I))
             if not date_elem:
-                # 查找形如 2026.04.27 或 2026-04-27 格式的文本
                 text = article.get_text()
                 date_match = re.search(r'(\d{4}[.-]\d{1,2}[.-]\d{1,2})', text)
                 if date_match:
@@ -110,21 +181,18 @@ def parse_hololive_news(html: str) -> List[Dict]:
                     continue
             else:
                 pub_date = date_elem.get_text(strip=True)
-                # 统一日期格式
                 pub_date = re.sub(r'[年月]', '.', pub_date).replace('日', '').strip('.')
 
             # 查找标题和链接
             link_elem = article.find('a', href=True)
             if not link_elem:
-                # 可能是标题在 h2/h3 内，但外层没有包裹 a 标签
                 title_elem = article.find(['h2', 'h3', 'h4', 'p', 'span'])
                 if title_elem:
                     title = title_elem.get_text(strip=True)
-                    # 过滤掉日期和过短的文本
                     if title and len(title) > 5 and title != pub_date:
                         news_list.append({
                             'title': title,
-                            'link': '#',  # 无链接时占位
+                            'link': '#',
                             'pub_date': pub_date,
                             'source': 'Hololive Production'
                         })
@@ -134,16 +202,12 @@ def parse_hololive_news(html: str) -> List[Dict]:
             if link and not link.startswith('http'):
                 link = urljoin('https://hololivepro.com', link)
 
-            # 标题优先从 a 标签获取
             title = link_elem.get_text(strip=True)
             if not title or len(title) < 3:
-                # 从 h2/h3 等标签获取
                 title_elem = article.find(['h2', 'h3', 'h4', 'p', 'span'])
                 title = title_elem.get_text(strip=True) if title_elem else ""
 
-            # 过滤掉无效条目
             if title and len(title) > 5 and title != pub_date:
-                # 去除日期前缀
                 title = re.sub(r'^\d{4}[.-]\d{1,2}[.-]\d{1,2}\s*', '', title)
                 news_list.append({
                     'title': title,
@@ -153,7 +217,6 @@ def parse_hololive_news(html: str) -> List[Dict]:
                 })
 
         print(f"  [OK] Hololive Production: 解析到 {len(news_list)} 条新闻")
-        
     except Exception as e:
         print(f"  [错误] Hololive 解析失败: {e}")
     
@@ -162,20 +225,14 @@ def parse_hololive_news(html: str) -> List[Dict]:
 # ==================== Nijisanji 解析 ====================
 
 def parse_nijisanji_news(html: str) -> List[Dict]:
-    """
-    解析 Nijisanji 新闻页面
-    基于官方 HTML 结构：新闻以列表形式展示，包含日期和标题
-    """
+    """解析 Nijisanji 新闻页面"""
     news_list = []
     try:
         soup = BeautifulSoup(html, 'html.parser')
-        
-        # 查找所有可能包含新闻的 li 标签
         items = soup.find_all('li', class_=re.compile(r'news|post|item', re.I))
         if not items:
             items = soup.find_all(['li', 'div'], class_=True)
         
-        # 备用：直接找带日期的段落
         if not items:
             paragraphs = soup.find_all(['p', 'div'])
             items = [p for p in paragraphs if re.search(r'\d{4}[./]\d{1,2}[./]\d{1,2}', p.get_text())]
@@ -183,13 +240,11 @@ def parse_nijisanji_news(html: str) -> List[Dict]:
         for item in items[:20]:
             text = item.get_text()
             
-            # 提取日期（格式：2026.04.27 或 2026-04-27）
             date_match = re.search(r'(\d{4}[./-]\d{1,2}[./-]\d{1,2})', text)
             if not date_match:
                 continue
             pub_date = date_match.group(1).replace('/', '.')
             
-            # 查找链接
             link_elem = item.find('a', href=True)
             if not link_elem:
                 continue
@@ -198,7 +253,6 @@ def parse_nijisanji_news(html: str) -> List[Dict]:
             if link and not link.startswith('http'):
                 link = urljoin('https://www.nijisanji.jp', link)
             
-            # 提取标题（排除日期部分）
             title = link_elem.get_text(strip=True)
             if not title or len(title) < 3:
                 title = re.sub(r'^\d{4}[./-]\d{1,2}[./-]\d{1,2}\s*', '', text).strip()
@@ -212,69 +266,96 @@ def parse_nijisanji_news(html: str) -> List[Dict]:
                 })
         
         print(f"  [OK] Nijisanji: 解析到 {len(news_list)} 条新闻")
-        
     except Exception as e:
         print(f"  [错误] Nijisanji 解析失败: {e}")
     
     return news_list
 
-# ==================== B站动态解析 ====================
+# ==================== B站动态解析（支持 WBI 签名）====================
 
-def fetch_bilibili_dynamics(uid: str, limit: int = 5) -> List[Dict]:
-    """
-    通过 B站 API 获取指定 UP 主的动态
-    API 来源：https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space
-    """
+def fetch_bilibili_dynamics(uid: str, limit: int = 10) -> List[Dict]:
+    """通过 B站 API 获取指定 UP 主的动态（自动带 WBI 签名）"""
     dynamics = []
     try:
-        url = f"https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid={uid}&offset=&page_size={limit}"
-        data = fetch_json(url)
+        url = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
+        params = {
+            "host_mid": uid,
+            "offset": "",
+            "page_size": limit
+        }
         
-        if not data or data.get('code') != 0:
-            print(f"  [警告] B站 API 返回错误，UID: {uid}")
+        print(f"  [B站] 正在获取 UID {uid} 的动态...")
+        data = fetch_json(url, params)
+        
+        if not data:
+            print(f"  [警告] B站 API 返回空数据，UID: {uid}")
+            return []
+        
+        if data.get('code') != 0:
+            print(f"  [警告] B站 API 返回错误码 {data.get('code')}: {data.get('message', '未知错误')}, UID: {uid}")
+            if data.get('code') == -352:
+                print(f"  [提示] 错误码 -352 表示风控校验失败，请检查 Cookie 是否过期或需要 WBI 签名")
             return []
         
         items = data.get('data', {}).get('items', [])
+        if not items:
+            print(f"  [B站] UID {uid} 暂无动态")
+            return []
+        
         for item in items[:limit]:
-            # 提取动态内容
             modules = item.get('modules', {})
+            
+            # 提取作者信息
+            author = modules.get('module_author', {})
+            author_name = author.get('name', f'UID {uid}')
+            
+            # 提取动态内容（处理不同类型的动态）
             desc = modules.get('module_dynamic', {}).get('desc', {})
             title = desc.get('text', '')
             
             # 如果是转发动态，提取原始内容
-            if not title and 'orig' in modules:
-                orig = modules.get('orig', {}).get('modules', {})
-                orig_desc = orig.get('module_dynamic', {}).get('desc', {})
+            if not title and 'orig' in item:
+                orig = item.get('orig', {})
+                orig_modules = orig.get('modules', {})
+                orig_desc = orig_modules.get('module_dynamic', {}).get('desc', {})
                 title = orig_desc.get('text', '')
+                if not title:
+                    orig_author = orig_modules.get('module_author', {})
+                    author_name = orig_author.get('name', author_name)
             
+            # 如果还是没有，尝试从简介中获取
             if not title:
-                # 尝试从其他字段提取
-                title = modules.get('module_author', {}).get('name', '') + ' 发布了新动态'
+                title = author_name + ' 发布了新动态'
             
             # 截取过长的内容
             if len(title) > 100:
                 title = title[:100] + '...'
             
             # 获取发布时间
-            timestamp = item.get('timestamp', 0)
+            timestamp = author.get('pub_ts', 0)
             if timestamp:
-                pub_date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+                pub_date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M')
             else:
                 pub_date = ''
             
-            # 获取链接
-            link = f"https://t.bilibili.com/{item.get('id_str', '')}" if item.get('id_str') else ''
+            # 获取动态 ID 和链接
+            id_str = item.get('id_str', '')
+            link = f"https://t.bilibili.com/{id_str}" if id_str else ''
             
             if title:
                 dynamics.append({
                     'title': title,
                     'link': link,
                     'pub_date': pub_date,
-                    'source': f'B站 UP主 {uid}'
+                    'source': f'B站: {author_name}'
                 })
         
         if dynamics:
-            print(f"  [OK] B站 UID {uid}: 获取到 {len(dynamics)} 条动态")
+            print(f"  [OK] UID {uid}: 获取到 {len(dynamics)} 条动态")
+        else:
+            print(f"  [B站] UID {uid} 没有有效的动态内容")
+        
+        time.sleep(1)  # 避免请求过快
         
     except Exception as e:
         print(f"  [错误] B站动态获取失败 UID {uid}: {e}")
@@ -289,10 +370,13 @@ def fetch_bilibili_news() -> List[Dict]:
         return []
     
     print(f"[INFO] 开始抓取 {len(BILIBILI_UIDS)} 个 B站 UP 主动态")
+    
+    if not BILI_COOKIE:
+        print("  [警告] 未配置 BILI_COOKIE，低版本的 API 可能无法获取数据")
+    
     for uid in BILIBILI_UIDS:
         dynamics = fetch_bilibili_dynamics(uid)
         all_dynamics.extend(dynamics)
-        time.sleep(0.5)  # 避免请求过快
     
     print(f"  [OK] B站动态: 总共抓取到 {len(all_dynamics)} 条")
     return all_dynamics
@@ -322,7 +406,7 @@ def generate_html(all_news: Dict[str, List[Dict]]) -> str:
         </style>
     </head>
     <body>
-        <h1>VTuber新闻汇总</h1>
+        <h1>🎮 VTuber新闻汇总</h1>
         <p>抓取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
         <p>新闻总数: {total_news} 条</p>
     """
@@ -330,7 +414,7 @@ def generate_html(all_news: Dict[str, List[Dict]]) -> str:
     displayed_news = 0
     for source_name, news_list in all_news.items():
         if news_list:
-            html += f'<h2>{source_name}</h2>'
+            html += f'<h2>📌 {source_name}</h2>'
             for news in news_list:
                 displayed_news += 1
                 link = news.get('link', '')
@@ -353,7 +437,7 @@ def generate_html(all_news: Dict[str, List[Dict]]) -> str:
     html += f"""
         <div class="footer">
             <p>本邮件由 GitHub Actions 自动生成 | VTuber新闻订阅</p>
-        
+            <p>📧 如有问题请联系管理员</p>
         </div>
     </body>
     </html>
@@ -372,29 +456,20 @@ def send_email(html_body: str):
         return
     
     try:
-        # 创建邮件
         msg = MIMEMultipart('alternative')
-        
-        # ✅ 关键修复：From字段使用简单格式，不使用Header编码
-        # QQ邮箱要求格式: "昵称 <邮箱地址>"，中间必须有空格
         msg['From'] = f"MoeFace News <{SMTP_USER}>"
-        
         msg['To'] = TO_EMAIL
         msg['Subject'] = f"VTuber新闻汇总 - {datetime.now().strftime('%Y-%m-%d')}"
         msg['Date'] = formatdate(localtime=True)
         
-        # 添加HTML内容
         html_part = MIMEText(html_body, 'html', 'utf-8')
         msg.attach(html_part)
         
-        # 连接并发送
         print(f"[邮件] 正在连接 {SMTP_HOST}:{SMTP_PORT}")
         
         if SMTP_PORT == 465:
-            # SSL连接
             server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
         else:
-            # STARTTLS连接
             server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
             server.starttls()
         
@@ -424,16 +499,13 @@ def main():
     print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 50)
     
-    # 检查邮件配置
     if not SMTP_USER:
         print("[警告] SMTP_USER 未设置，将只抓取新闻不发送邮件")
     if not TO_EMAIL:
         print("[警告] TO_EMAIL 未设置，将只抓取新闻不发送邮件")
     
-    # 抓取新闻
     all_news = {}
     
-    # 抓取常规新闻源
     for source in NEWS_SOURCES:
         html = fetch_html(source['url'])
         if not html:
@@ -458,14 +530,12 @@ def main():
     total_news = sum(len(items) for items in all_news.values())
     print(f"\n总共抓取到 {total_news} 条新闻")
     
-    # 生成HTML并发送
     html_body = generate_html(all_news)
     
     if SMTP_USER and TO_EMAIL:
         send_email(html_body)
     else:
         print(f"成功抓取 {total_news} 条新闻，但邮件配置不完整，未发送")
-        # 保存到文件作为备份
         with open('vtuber_news_report.md', 'w', encoding='utf-8') as f:
             f.write(f"# VTuber新闻汇总\n\n")
             f.write(f"抓取时间: {datetime.now()}\n")
