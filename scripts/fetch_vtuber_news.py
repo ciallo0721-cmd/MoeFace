@@ -233,7 +233,7 @@ def parse_nijisanji_news(html: str) -> List[Dict]:
         print(f"  [错误] Nijisanji 解析失败: {e}")
     return news_list
 
-# ==================== B站动态解析（修正 timestamp 字符串问题）====================
+# ==================== B站动态解析（健壮版）====================
 
 def fetch_bilibili_dynamics(uid: str, limit: int = 10) -> List[Dict]:
     dynamics = []
@@ -264,49 +264,66 @@ def fetch_bilibili_dynamics(uid: str, limit: int = 10) -> List[Dict]:
             return []
 
         for item in items[:limit]:
-            modules = item.get('modules', {})
-            author = modules.get('module_author', {})
-            author_name = author.get('name', f'UID {uid}')
+            try:
+                modules = item.get('modules', {}) or {}
+                author = modules.get('module_author', {}) or {}
+                author_name = author.get('name', f'UID {uid}') if isinstance(author, dict) else f'UID {uid}'
 
-            desc = modules.get('module_dynamic', {}).get('desc', {})
-            title = desc.get('text', '')
+                # 处理动态内容，可能为 None
+                dynamic_module = modules.get('module_dynamic') or {}
+                if isinstance(dynamic_module, dict):
+                    desc = dynamic_module.get('desc') or {}
+                else:
+                    desc = {}
+                if isinstance(desc, dict):
+                    title = desc.get('text', '')
+                else:
+                    title = ''
 
-            if not title and 'orig' in item:
-                orig = item.get('orig', {})
-                orig_modules = orig.get('modules', {})
-                orig_desc = orig_modules.get('module_dynamic', {}).get('desc', {})
-                title = orig_desc.get('text', '')
+                # 处理转发动态
+                if not title and 'orig' in item:
+                    orig = item.get('orig', {}) or {}
+                    orig_modules = orig.get('modules', {}) or {}
+                    orig_dynamic = orig_modules.get('module_dynamic') or {}
+                    if isinstance(orig_dynamic, dict):
+                        orig_desc = orig_dynamic.get('desc') or {}
+                        if isinstance(orig_desc, dict):
+                            title = orig_desc.get('text', '')
+                        if not title:
+                            orig_author = orig_modules.get('module_author') or {}
+                            if isinstance(orig_author, dict):
+                                author_name = orig_author.get('name', author_name)
+
                 if not title:
-                    orig_author = orig_modules.get('module_author', {})
-                    author_name = orig_author.get('name', author_name)
+                    title = author_name + ' 发布了新动态'
 
-            if not title:
-                title = author_name + ' 发布了新动态'
+                if len(title) > 100:
+                    title = title[:100] + '...'
 
-            if len(title) > 100:
-                title = title[:100] + '...'
-
-            # 修复：pub_ts 可能是字符串，需要转换为整数
-            timestamp = author.get('pub_ts', 0)
-            if timestamp:
-                try:
-                    ts_int = int(timestamp)
-                    pub_date = datetime.fromtimestamp(ts_int).strftime('%Y-%m-%d %H:%M')
-                except (ValueError, TypeError):
+                # 处理时间戳
+                timestamp = author.get('pub_ts', 0) if isinstance(author, dict) else 0
+                if timestamp:
+                    try:
+                        ts_int = int(timestamp)
+                        pub_date = datetime.fromtimestamp(ts_int).strftime('%Y-%m-%d %H:%M')
+                    except (ValueError, TypeError):
+                        pub_date = ''
+                else:
                     pub_date = ''
-            else:
-                pub_date = ''
 
-            id_str = item.get('id_str', '')
-            link = f"https://t.bilibili.com/{id_str}" if id_str else ''
+                id_str = item.get('id_str', '')
+                link = f"https://t.bilibili.com/{id_str}" if id_str else ''
 
-            if title:
-                dynamics.append({
-                    'title': title,
-                    'link': link,
-                    'pub_date': pub_date,
-                    'source': f'B站: {author_name}'
-                })
+                if title:
+                    dynamics.append({
+                        'title': title,
+                        'link': link,
+                        'pub_date': pub_date,
+                        'source': f'B站: {author_name}'
+                    })
+            except Exception as inner_e:
+                print(f"    [警告] 处理单条动态时出错: {inner_e}, 跳过")
+                continue
 
         if dynamics:
             print(f"  [OK] UID {uid}: 获取到 {len(dynamics)} 条动态")
