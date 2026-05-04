@@ -427,7 +427,7 @@ def fetch_weibo_news() -> List[Dict]:
     print(f"[INFO] 开始抓取 {len(WEIBO_CONFIG['monitor_uids'])} 个微博用户的动态")
     
     for idx, uid in enumerate(WEIBO_CONFIG['monitor_uids']):
-        name = WEIBO_CONFIG['monitor_names'][idx] if idx < len(WEIBO_CONFIG['monitor_names']') else f'用户{uid}'
+        name = WEIBO_CONFIG['monitor_names'][idx] if idx < len(WEIBO_CONFIG['monitor_names']) else f'用户{uid}'
         posts = fetch_weibo_posts(uid, 15, name)
         all_weibo_news.extend(posts)
         time.sleep(2)  # 避免请求过快，增加延时
