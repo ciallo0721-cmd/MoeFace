@@ -44,7 +44,6 @@ WEIBO_CONFIG = {
     'enabled': True,
     'monitor_uids': ['7618923072'],
     'monitor_names': ['永雏塔菲'],
-    'cookie': os.getenv('WEIBO_COOKIE', ''),
     'headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Referer': 'https://m.weibo.cn/',
@@ -54,9 +53,13 @@ WEIBO_CONFIG = {
         'X-Requested-With': 'XMLHttpRequest',
     }
 }
-if WEIBO_CONFIG['cookie']:
-    WEIBO_CONFIG['headers']['Cookie'] = WEIBO_CONFIG['cookie']
-    print("[配置] ✅ 微博 Cookie 已加载")
+
+# 读取环境变量 WEIBO_COOKIE
+weibo_cookie_env = os.getenv('WEIBO_COOKIE', '')
+print(f"[DEBUG] WEIBO_COOKIE 环境变量存在: {bool(weibo_cookie_env)}")
+if weibo_cookie_env:
+    WEIBO_CONFIG['headers']['Cookie'] = weibo_cookie_env
+    print("[配置] ✅ 微博 Cookie 已从环境变量加载")
 else:
     print("[配置] ℹ️ 微博 Cookie 未配置，将尝试无登录抓取")
 
@@ -76,102 +79,174 @@ HEADERS = {
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 }
+
 if BILI_COOKIE:
     HEADERS['Cookie'] = BILI_COOKIE
     print("[配置] ✅ B站 Cookie 已加载")
 else:
     print("[配置] ⚠️ B站 Cookie 未配置")
 
-# ==================== WBI 签名 (略，同前) ====================
-MIXIN_KEY_ENC_TAB = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]
+# ==================== WBI 签名 ====================
+MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+]
 
-def get_wbi_keys():
+def get_wbi_keys() -> Tuple[str, str]:
     try:
-        r = requests.get('https://api.bilibili.com/x/web-interface/nav', headers=HEADERS, timeout=10)
-        data = r.json()
+        url = 'https://api.bilibili.com/x/web-interface/nav'
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        data = response.json()
         if data.get('code') != 0:
             return '', ''
-        img = data['data']['wbi_img']['img_url'].rsplit('/',1)[-1].split('.')[0]
-        sub = data['data']['wbi_img']['sub_url'].rsplit('/',1)[-1].split('.')[0]
-        return img, sub
-    except:
+        wbi_img_url = data['data']['wbi_img']['img_url']
+        wbi_sub_url = data['data']['wbi_img']['sub_url']
+        img_key = wbi_img_url.rsplit('/', 1)[-1].split('.')[0]
+        sub_key = wbi_sub_url.rsplit('/', 1)[-1].split('.')[0]
+        return img_key, sub_key
+    except Exception as e:
+        print(f"  [WBI] 获取 keys 异常: {e}")
         return '', ''
 
-def encrypt_wbi(params, img_key, sub_key):
+def encrypt_wbi(params: dict, img_key: str, sub_key: str) -> dict:
     key_str = img_key + sub_key
     if len(key_str) < 64:
         return params
-    mixin_key = ''.join(key_str[MIXIN_KEY_ENC_TAB[i]] for i in range(64))[:32]
+    mixin_key = ''
+    for i in range(64):
+        mixin_key += key_str[MIXIN_KEY_ENC_TAB[i]]
+    mixin_key = mixin_key[:32]
     params['wts'] = int(time.time())
     sorted_params = sorted(params.items())
     query = urllib.parse.urlencode(sorted_params)
-    params['w_rid'] = hashlib.md5((query + mixin_key).encode()).hexdigest()
+    sign_str = query + mixin_key
+    params['w_rid'] = hashlib.md5(sign_str.encode()).hexdigest()
     return params
 
-def sign_request(url, params):
+def sign_request(url: str, params: dict) -> Tuple[str, dict]:
     img_key, sub_key = get_wbi_keys()
     if not img_key or not sub_key:
         return url, params
-    return url, encrypt_wbi(params.copy(), img_key, sub_key)
+    signed_params = encrypt_wbi(params.copy(), img_key, sub_key)
+    return url, signed_params
 
-def fetch_html(url, timeout=15):
+# ==================== 工具函数 ====================
+
+def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
     try:
-        r = requests.get(url, timeout=timeout, headers=HEADERS)
-        r.raise_for_status()
-        r.encoding = 'utf-8'
-        return r.text
-    except Exception as e:
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        return response.text
+    except requests.RequestException as e:
         print(f"  [错误] 抓取失败 {url}: {e}")
         return None
 
-def fetch_json(url, params=None, timeout=15):
+def fetch_json(url: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
     try:
         if params is None:
             params = {}
         signed_url, signed_params = sign_request(url, params)
-        r = requests.get(signed_url, params=signed_params, headers=HEADERS, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
+        response = requests.get(signed_url, params=signed_params, headers=HEADERS, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
         print(f"  [错误] 抓取失败 {url}: {e}")
         return None
 
-# ==================== Hololive / Nijisanji 解析 (与之前相同，略) ====================
-def parse_hololive_news(html):
+# ==================== 日期处理辅助函数 ====================
+
+def normalize_date(date_str: str) -> Optional[str]:
+    if not date_str:
+        return None
+    date_str = date_str.strip()
+    match = re.match(r'(\d{4})[./-](\d{1,2})[./-](\d{1,2})', date_str)
+    if match:
+        year, month, day = match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    match = re.match(r'(\d{4})年(\d{1,2})月(\d{1,2})日', date_str)
+    if match:
+        year, month, day = match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    return None
+
+def is_recent(date_str: str, days: int = 3) -> bool:
+    if not date_str:
+        return False
+    try:
+        if ' ' in date_str:
+            dt = datetime.strptime(date_str.split(' ')[0], '%Y-%m-%d')
+        else:
+            dt = datetime.strptime(date_str, '%Y-%m-%d')
+        threshold = datetime.now() - timedelta(days=days)
+        return dt >= threshold
+    except Exception:
+        return False
+
+def parse_weibo_datetime(dt_str: str) -> str:
+    try:
+        cleaned = re.sub(r'\+\d{4}', '', dt_str)
+        dt = datetime.strptime(cleaned.strip(), '%a %b %d %H:%M:%S %Y')
+        return dt.strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', dt_str)
+        if date_match:
+            return date_match.group(1)
+        return datetime.now().strftime('%Y-%m-%d %H:%M')
+
+# ==================== Hololive 解析 ====================
+
+def parse_hololive_news(html: str) -> List[Dict]:
     news_list = []
     try:
         soup = BeautifulSoup(html, 'html.parser')
         articles = soup.find_all('div', class_=re.compile(r'news|post|article|entry', re.I))
-        if not articles:
+        if not articles or len(articles) < 2:
             articles = soup.find_all(['li', 'div'], class_=True)
         for article in articles[:15]:
-            date_elem = article.find('time') or article.find(class_=re.compile(r'date|time', re.I))
-            if date_elem:
-                pub_date_raw = re.sub(r'[年月]', '.', date_elem.get_text(strip=True)).replace('日', '').strip('.')
-            else:
+            date_elem = article.find('time')
+            if not date_elem:
+                date_elem = article.find(class_=re.compile(r'date|time', re.I))
+            if not date_elem:
                 text = article.get_text()
-                m = re.search(r'(\d{4}[.-]\d{1,2}[.-]\d{1,2})', text)
-                if not m:
+                date_match = re.search(r'(\d{4}[.-]\d{1,2}[.-]\d{1,2})', text)
+                if date_match:
+                    pub_date_raw = date_match.group(1)
+                else:
                     continue
-                pub_date_raw = m.group(1)
+            else:
+                pub_date_raw = date_elem.get_text(strip=True)
+                pub_date_raw = re.sub(r'[年月]', '.', pub_date_raw).replace('日', '').strip('.')
             pub_date = normalize_date(pub_date_raw)
             if not pub_date or not is_recent(pub_date):
                 continue
             link_elem = article.find('a', href=True)
             if not link_elem:
+                title_elem = article.find(['h2', 'h3', 'h4', 'p', 'span'])
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    if title and len(title) > 5 and title != pub_date:
+                        news_list.append({
+                            'title': title[:150],
+                            'link': '#',
+                            'pub_date': pub_date,
+                            'source': 'Hololive Production'
+                        })
                 continue
-            link = link_elem.get('href')
+            link = link_elem.get('href', '')
             if link and not link.startswith('http'):
                 link = urljoin('https://hololivepro.com', link)
             title = link_elem.get_text(strip=True)
             if not title or len(title) < 3:
-                title_elem = article.find(['h2','h3','h4','p','span'])
-                title = title_elem.get_text(strip=True) if title_elem else ""
-            if title and len(title) > 5:
+                title_elem = article.find(['h2', 'h3', 'h4', 'p', 'span'])
+                title = title_elem.get_text(strip=True)[:150] if title_elem else ""
+            if title and len(title) > 5 and title != pub_date:
                 title = re.sub(r'^\d{4}[.-]\d{1,2}[.-]\d{1,2}\s*', '', title)
                 news_list.append({
                     'title': title[:150],
-                    'link': link,
+                    'link': link if link != '#' else '',
                     'pub_date': pub_date,
                     'source': 'Hololive Production'
                 })
@@ -180,32 +255,37 @@ def parse_hololive_news(html):
         print(f"  [错误] Hololive 解析失败: {e}")
     return news_list
 
-def parse_nijisanji_news(html):
+# ==================== Nijisanji 解析 ====================
+
+def parse_nijisanji_news(html: str) -> List[Dict]:
     news_list = []
     try:
         soup = BeautifulSoup(html, 'html.parser')
         items = soup.find_all('li', class_=re.compile(r'news|post|item', re.I))
         if not items:
-            items = soup.find_all(['li','div'], class_=True)
+            items = soup.find_all(['li', 'div'], class_=True)
+        if not items:
+            paragraphs = soup.find_all(['p', 'div'])
+            items = [p for p in paragraphs if re.search(r'\d{4}[./]\d{1,2}[./]\d{1,2}', p.get_text())]
         for item in items[:20]:
             text = item.get_text()
-            m = re.search(r'(\d{4}[./-]\d{1,2}[./-]\d{1,2})', text)
-            if not m:
+            date_match = re.search(r'(\d{4}[./-]\d{1,2}[./-]\d{1,2})', text)
+            if not date_match:
                 continue
-            pub_date_raw = m.group(1).replace('/','.')
+            pub_date_raw = date_match.group(1).replace('/', '.')
             pub_date = normalize_date(pub_date_raw)
             if not pub_date or not is_recent(pub_date):
                 continue
             link_elem = item.find('a', href=True)
             if not link_elem:
                 continue
-            link = link_elem.get('href')
+            link = link_elem.get('href', '')
             if link and not link.startswith('http'):
                 link = urljoin('https://www.nijisanji.jp', link)
             title = link_elem.get_text(strip=True)
             if not title or len(title) < 3:
                 title = re.sub(r'^\d{4}[./-]\d{1,2}[./-]\d{1,2}\s*', '', text).strip()
-            if title:
+            if title and len(title) > 3:
                 news_list.append({
                     'title': title[:150],
                     'link': link,
@@ -217,66 +297,93 @@ def parse_nijisanji_news(html):
         print(f"  [错误] Nijisanji 解析失败: {e}")
     return news_list
 
-# ==================== 修正后的微博抓取 ====================
-def fetch_weibo_posts(uid, limit=10, name='微博用户'):
-    """使用 m.weibo.cn 接口，containerid = 100505 + uid"""
+# ==================== 微博抓取 (修正版) ====================
+
+def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> List[Dict]:
+    """抓取微博用户的帖子，返回解析后的新闻列表"""
     weibo_news = []
     print(f"  [微博] 抓取: {name} (UID: {uid})")
+    
     try:
-        # 直接构造 containerid
-        containerid = f"100505{uid}"
+        # 使用正确的 containerid: 107603 + uid
+        containerid = f"107603{uid}"
         url = f"https://m.weibo.cn/api/container/getIndex?type=uid&value={uid}&containerid={containerid}"
         headers = WEIBO_CONFIG['headers'].copy()
+        
         resp = requests.get(url, headers=headers, timeout=15)
+        
         if resp.status_code != 200:
             print(f"  [错误] HTTP {resp.status_code}")
             return []
+            
         data = resp.json()
+        
         if data.get('ok') != 1:
             print(f"  [警告] API 返回异常: {data.get('msg', '未知错误')}")
             return []
+            
+        # 提取卡片列表
         cards = data.get('data', {}).get('cards', [])
         if not cards:
             print(f"  [微博] {name} 无卡片数据")
             return []
-        for card in cards[:limit*2]:
-            if card.get('card_type') != 9:
-                continue
-            mblog = card.get('mblog', {})
+        
+        processed = 0
+        for card in cards:
+            if processed >= limit:
+                break
+            # 获取 mblog 对象（支持多种卡片结构）
+            mblog = card.get('mblog') or card.get('status')
             if not mblog:
                 continue
-            raw_text = mblog.get('text', '')
-            title = re.sub('<[^<]+?>', '', raw_text).strip()
-            if not title:
+                
+            try:
+                # 提取微博文本
+                raw_text = mblog.get('text', '')
+                title = re.sub('<[^<]+?>', '', raw_text).strip()
+                if not title:
+                    if mblog.get('retweeted_status'):
+                        title = "转发微博"
+                    else:
+                        continue
+                
+                # 处理转发微博
                 if mblog.get('retweeted_status'):
-                    title = "转发微博"
+                    retweet = mblog['retweeted_status']
+                    retweet_text = re.sub('<[^<]+?>', '', retweet.get('text', ''))
+                    if title == "转发微博":
+                        title = f"[转发] {retweet_text}"
+                    else:
+                        title = f"{title} // {retweet_text}"
+                
+                if len(title) > 200:
+                    title = title[:197] + "..."
+                    
+                # 构建微博链接
+                post_id = mblog.get('id', '')
+                link = f"https://m.weibo.cn/detail/{post_id}" if post_id else f"https://m.weibo.cn/u/{uid}"
+                
+                # 处理时间
+                created_at = mblog.get('created_at', '')
+                if created_at:
+                    pub_date = parse_weibo_datetime(created_at)
+                    if not is_recent(pub_date):
+                        continue
                 else:
-                    continue
-            # 处理转发
-            if mblog.get('retweeted_status'):
-                retweet = mblog['retweeted_status']
-                retweet_text = re.sub('<[^<]+?>', '', retweet.get('text', ''))
-                if title == "转发微博":
-                    title = f"[转发] {retweet_text}"
-                else:
-                    title = f"{title} // {retweet_text}"
-            if len(title) > 200:
-                title = title[:197] + "..."
-            post_id = mblog.get('id', '')
-            link = f"https://m.weibo.cn/detail/{post_id}" if post_id else f"https://m.weibo.cn/u/{uid}"
-            created_at = mblog.get('created_at', '')
-            if created_at:
-                pub_date = parse_weibo_datetime(created_at)
-                if not is_recent(pub_date):
-                    continue
-            else:
-                pub_date = datetime.now().strftime('%Y-%m-%d %H:%M')
-            weibo_news.append({
-                'title': title,
-                'link': link,
-                'pub_date': pub_date,
-                'source': f'微博: {name}'
-            })
+                    pub_date = datetime.now().strftime('%Y-%m-%d %H:%M')
+                
+                weibo_news.append({
+                    'title': title,
+                    'link': link,
+                    'pub_date': pub_date,
+                    'source': f'微博: {name}'
+                })
+                processed += 1
+                    
+            except Exception as post_error:
+                print(f"    [警告] 处理单条微博失败: {post_error}")
+                continue
+        
         # 去重
         unique = []
         seen = set()
@@ -285,39 +392,32 @@ def fetch_weibo_posts(uid, limit=10, name='微博用户'):
             if key not in seen:
                 seen.add(key)
                 unique.append(item)
-        print(f"  [OK] {name}: {len(unique)} 条动态")
+                
+        print(f"  [OK] {name}: {len(unique)} 条最近动态")
         return unique
+            
     except Exception as e:
         print(f"  [错误] {name} 抓取失败: {e}")
         traceback.print_exc()
         return []
 
-def fetch_weibo_news():
-    all_news = []
+def fetch_weibo_news() -> List[Dict]:
+    """抓取所有配置的微博用户的动态"""
+    all_weibo_news = []
     if not WEIBO_CONFIG['enabled'] or not WEIBO_CONFIG['monitor_uids']:
         return []
     print(f"[INFO] 开始抓取 {len(WEIBO_CONFIG['monitor_uids'])} 个微博用户")
     for idx, uid in enumerate(WEIBO_CONFIG['monitor_uids']):
         name = WEIBO_CONFIG['monitor_names'][idx] if idx < len(WEIBO_CONFIG['monitor_names']) else f'用户{uid}'
         posts = fetch_weibo_posts(uid, 15, name)
-        all_news.extend(posts)
+        all_weibo_news.extend(posts)
         time.sleep(2)
-    print(f"  [OK] 微博: 共 {len(all_news)} 条")
-    return all_news
+    print(f"  [OK] 微博: 共 {len(all_weibo_news)} 条")
+    return all_weibo_news
 
-def parse_weibo_datetime(dt_str):
-    try:
-        cleaned = re.sub(r'\+\d{4}', '', dt_str)
-        dt = datetime.strptime(cleaned.strip(), '%a %b %d %H:%M:%S %Y')
-        return dt.strftime('%Y-%m-%d %H:%M')
-    except:
-        m = re.search(r'(\d{4}-\d{2}-\d{2})', dt_str)
-        if m:
-            return m.group(1)
-        return datetime.now().strftime('%Y-%m-%d %H:%M')
+# ==================== B站动态抓取 ====================
 
-# ==================== B站动态 (与之前相同，略) ====================
-def fetch_bilibili_dynamics(uid, limit=10):
+def fetch_bilibili_dynamics(uid: str, limit: int = 10) -> List[Dict]:
     dynamics = []
     try:
         url = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
@@ -370,7 +470,7 @@ def fetch_bilibili_dynamics(uid, limit=10):
         print(f"  [错误] B站 {uid}: {e}")
     return dynamics
 
-def fetch_bilibili_news():
+def fetch_bilibili_news() -> List[Dict]:
     all_news = []
     if not BILIBILI_UIDS:
         return []
@@ -380,40 +480,20 @@ def fetch_bilibili_news():
     print(f"  [OK] B站: 共 {len(all_news)} 条")
     return all_news
 
-# ==================== 日期辅助函数 ====================
-def normalize_date(date_str):
-    if not date_str:
-        return None
-    m = re.match(r'(\d{4})[./-](\d{1,2})[./-](\d{1,2})', date_str.strip())
-    if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    m = re.match(r'(\d{4})年(\d{1,2})月(\d{1,2})日', date_str)
-    if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    return None
-
-def is_recent(date_str, days=3):
-    if not date_str:
-        return False
-    try:
-        if ' ' in date_str:
-            dt = datetime.strptime(date_str.split(' ')[0], '%Y-%m-%d')
-        else:
-            dt = datetime.strptime(date_str, '%Y-%m-%d')
-        return dt >= datetime.now() - timedelta(days=days)
-    except:
-        return False
-
 # ==================== HTML 生成 ====================
-def escape_html(text):
+
+def escape_html(text: str) -> str:
     if not text:
         return ''
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
 
-def generate_html(all_news):
+def generate_html(all_news: Dict[str, List[Dict]]) -> str:
     total = sum(len(v) for v in all_news.values())
     html = f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>VTuber新闻汇总</title>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>VTuber新闻汇总</title>
 <style>
 body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
 h1 {{ color: #ff6b6b; border-bottom: 3px solid #ff6b6b; }}
@@ -422,11 +502,12 @@ h2 {{ color: #4ecdc4; border-left: 4px solid #4ecdc4; padding-left: 12px; margin
 .news-title a {{ color: #0066cc; text-decoration: none; }}
 .news-meta {{ font-size: 12px; color: #888; }}
 .footer {{ margin-top: 30px; padding-top: 15px; border-top: 1px solid #ddd; text-align: center; font-size: 12px; }}
-</style></head>
+</style>
+</head>
 <body>
 <h1>🎮 VTuber新闻汇总</h1>
 <p>抓取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-<p>新鲜新闻总数 (近3天): {total} 条</p>
+<p>新鲜新闻总数 (近3天内): {total} 条</p>
 """
     for source, items in all_news.items():
         if not items:
@@ -434,8 +515,8 @@ h2 {{ color: #4ecdc4; border-left: 4px solid #4ecdc4; padding-left: 12px; margin
         html += f'<h2>📌 {source}</h2>'
         for news in items[:50]:
             html += f'''<div class="news-item">
-<div class="news-title"><a href="{news.get('link','#')}" target="_blank">{escape_html(news.get('title',''))}</a></div>
-<div class="news-meta">日期: {escape_html(news.get('pub_date',''))} | 来源: {escape_html(source)}</div>
+<div class="news-title"><a href="{news.get('link', '#')}" target="_blank">{escape_html(news.get('title', ''))}</a></div>
+<div class="news-meta">日期: {escape_html(news.get('pub_date', ''))} | 来源: {escape_html(source)}</div>
 </div>'''
     if total == 0:
         html += '<p>近3天内暂无新新闻，请访问官网查看最新动态。</p>'
@@ -443,7 +524,8 @@ h2 {{ color: #4ecdc4; border-left: 4px solid #4ecdc4; padding-left: 12px; margin
     return html
 
 # ==================== 邮件发送 ====================
-def send_email(html_body, recipients):
+
+def send_email(html_body: str, recipients: List[str]):
     if not all([SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS]) or not recipients:
         print("[错误] 邮件配置不完整")
         return
@@ -468,18 +550,21 @@ def send_email(html_body, recipients):
         print(f"[邮件] ❌ 失败: {e}")
 
 # ==================== 主函数 ====================
+
 def main():
-    print("="*50)
+    print("=" * 50)
     print("VTuber News Fetcher (近3天新闻)")
     print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"过滤器: 只收录 {DATE_THRESHOLD.strftime('%Y-%m-%d')} 之后的新闻")
-    print("="*50)
+    print("=" * 50)
     if not RECIPIENTS:
         print("[警告] 无收件人")
     else:
         print(f"[配置] 收件人数: {len(RECIPIENTS)}")
 
     all_news = {}
+    
+    # Hololive & Nijisanji
     for src in NEWS_SOURCES:
         html = fetch_html(src['url'])
         if not html:
@@ -493,10 +578,12 @@ def main():
             news = []
         all_news[src['name']] = news
 
+    # B站动态
     bili = fetch_bilibili_news()
     if bili:
         all_news['国产 VTuber 动态'] = bili
 
+    # 微博动态
     weibo = fetch_weibo_news()
     if weibo:
         all_news['微博 VTuber 动态'] = weibo
