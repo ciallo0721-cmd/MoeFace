@@ -34,8 +34,9 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}           # 支持多个邮箱，逗号分隔
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
           BILI_COOKIE: ${{ secrets.BILI_COOKIE }}
+          WEIBO_COOKIE: ${{ secrets.WEIBO_COOKIE }}   # 新增
         run: python scripts/fetch_vtuber_news.py
         working-directory: .
 
