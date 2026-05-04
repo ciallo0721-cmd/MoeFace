@@ -22,6 +22,14 @@ from urllib.parse import urljoin
 CURRENT_DATE = datetime.now()
 DATE_THRESHOLD = CURRENT_DATE - timedelta(days=3)
 
+# 永雏塔菲判定阈值（可修改）
+TAFFY_THRESHOLD = 3               # 至少出现 3 条
+TAFFY_RATIO_THRESHOLD = 0.3       # 且占总新闻数的 30% 以上
+
+# 音频文件硬编码 Raw URL (仓库: ciallo0721-cmd/moeface, 分支: main, 目录: scripts)
+AUDIO_URL_TAFFY = "https://raw.githubusercontent.com/ciallo0721-cmd/moeface/main/scripts/yctf.mp3"
+AUDIO_URL_DEFAULT = "https://raw.githubusercontent.com/ciallo0721-cmd/moeface/main/scripts/vtb.mp3"
+
 NEWS_SOURCES = [
     {
         'name': 'Hololive Production',
@@ -297,15 +305,13 @@ def parse_nijisanji_news(html: str) -> List[Dict]:
         print(f"  [错误] Nijisanji 解析失败: {e}")
     return news_list
 
-# ==================== 微博抓取 (修正版) ====================
+# ==================== 微博抓取 ====================
 
 def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> List[Dict]:
-    """抓取微博用户的帖子，返回解析后的新闻列表"""
     weibo_news = []
     print(f"  [微博] 抓取: {name} (UID: {uid})")
     
     try:
-        # 使用正确的 containerid: 107603 + uid
         containerid = f"107603{uid}"
         url = f"https://m.weibo.cn/api/container/getIndex?type=uid&value={uid}&containerid={containerid}"
         headers = WEIBO_CONFIG['headers'].copy()
@@ -322,7 +328,6 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
             print(f"  [警告] API 返回异常: {data.get('msg', '未知错误')}")
             return []
             
-        # 提取卡片列表
         cards = data.get('data', {}).get('cards', [])
         if not cards:
             print(f"  [微博] {name} 无卡片数据")
@@ -332,13 +337,11 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
         for card in cards:
             if processed >= limit:
                 break
-            # 获取 mblog 对象（支持多种卡片结构）
             mblog = card.get('mblog') or card.get('status')
             if not mblog:
                 continue
                 
             try:
-                # 提取微博文本
                 raw_text = mblog.get('text', '')
                 title = re.sub('<[^<]+?>', '', raw_text).strip()
                 if not title:
@@ -347,7 +350,6 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                     else:
                         continue
                 
-                # 处理转发微博
                 if mblog.get('retweeted_status'):
                     retweet = mblog['retweeted_status']
                     retweet_text = re.sub('<[^<]+?>', '', retweet.get('text', ''))
@@ -359,11 +361,9 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                 if len(title) > 200:
                     title = title[:197] + "..."
                     
-                # 构建微博链接
                 post_id = mblog.get('id', '')
                 link = f"https://m.weibo.cn/detail/{post_id}" if post_id else f"https://m.weibo.cn/u/{uid}"
                 
-                # 处理时间
                 created_at = mblog.get('created_at', '')
                 if created_at:
                     pub_date = parse_weibo_datetime(created_at)
@@ -384,7 +384,6 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                 print(f"    [警告] 处理单条微博失败: {post_error}")
                 continue
         
-        # 去重
         unique = []
         seen = set()
         for item in weibo_news:
@@ -402,7 +401,6 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
         return []
 
 def fetch_weibo_news() -> List[Dict]:
-    """抓取所有配置的微博用户的动态"""
     all_weibo_news = []
     if not WEIBO_CONFIG['enabled'] or not WEIBO_CONFIG['monitor_uids']:
         return []
@@ -480,6 +478,32 @@ def fetch_bilibili_news() -> List[Dict]:
     print(f"  [OK] B站: 共 {len(all_news)} 条")
     return all_news
 
+# ==================== 永雏塔菲统计 & 音频选择 ====================
+
+def count_taffy_news(all_news: Dict[str, List[Dict]]) -> int:
+    """统计所有新闻中包含「永雏塔菲」的条目数"""
+    count = 0
+    for source, items in all_news.items():
+        for item in items:
+            title = item.get('title', '')
+            if '永雏塔菲' in title or '永雏塔菲' in source:
+                count += 1
+    return count
+
+def generate_audio_html(use_taffy_audio: bool) -> str:
+    """根据选择返回嵌入音频的 HTML 片段（使用 GitHub Raw URL）"""
+    audio_url = AUDIO_URL_TAFFY if use_taffy_audio else AUDIO_URL_DEFAULT
+    label = "永雏塔菲专属BGM" if use_taffy_audio else "VTuber综合BGM"
+    return f'''
+    <div style="margin: 15px 0; padding: 10px; background: #f0f0f0; border-radius: 8px;">
+        <audio controls style="width: 100%; max-width: 300px;">
+            <source src="{audio_url}" type="audio/mpeg">
+            您的浏览器不支持音频播放。
+        </audio>
+        <p style="font-size:12px; color:#666; margin:5px 0 0 0;">🎵 {label}（点击播放）</p>
+    </div>
+    '''
+
 # ==================== HTML 生成 ====================
 
 def escape_html(text: str) -> str:
@@ -487,7 +511,7 @@ def escape_html(text: str) -> str:
         return ''
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
 
-def generate_html(all_news: Dict[str, List[Dict]]) -> str:
+def generate_html(all_news: Dict[str, List[Dict]], audio_html: str = "") -> str:
     total = sum(len(v) for v in all_news.values())
     html = f"""<!DOCTYPE html>
 <html>
@@ -508,6 +532,7 @@ h2 {{ color: #4ecdc4; border-left: 4px solid #4ecdc4; padding-left: 12px; margin
 <h1>🎮 VTuber新闻汇总</h1>
 <p>抓取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
 <p>新鲜新闻总数 (近3天内): {total} 条</p>
+{audio_html}
 """
     for source, items in all_news.items():
         if not items:
@@ -590,7 +615,18 @@ def main():
 
     total = sum(len(v) for v in all_news.values())
     print(f"\n总共抓取到 {total} 条近3天内新闻")
-    html_body = generate_html(all_news)
+
+    # ---- 永雏塔菲统计与音频选择 ----
+    taffy_cnt = count_taffy_news(all_news)
+    print(f"[统计] 包含「永雏塔菲」的新闻数: {taffy_cnt} / {total}")
+    # 决策条件：taffy_cnt >= TAFFY_THRESHOLD 且 占比 >= TAFFY_RATIO_THRESHOLD (且 total>0)
+    use_taffy_audio = (total > 0 and 
+                       taffy_cnt >= TAFFY_THRESHOLD and 
+                       (taffy_cnt / total) >= TAFFY_RATIO_THRESHOLD)
+    print(f"[音频] 选择: {'yctf.mp3 (永雏塔菲专属)' if use_taffy_audio else 'vtb.mp3 (综合)'} (永雏塔菲较多? {use_taffy_audio})")
+    
+    audio_html = generate_audio_html(use_taffy_audio)
+    html_body = generate_html(all_news, audio_html)
 
     if SMTP_USER and RECIPIENTS:
         send_email(html_body, RECIPIENTS)
