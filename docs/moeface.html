@@ -833,7 +833,25 @@
                 }
                 
                 if (allMatches.length === 0) {
-                    log('人脸区域未匹配到特征库，尝试全图模式', 'warning');
+                    log('人脸区域未匹配到特征库（所有匹配分数均低于阈值），可尝试降低阈值', 'warning');
+                    // 仍然展示最高分（如果有）供参考
+                    let bestSim = 0;
+                    let bestName = '';
+                    for (let i = 0; i < detections.length; i++) {
+                        const desc128 = Array.from(detections[i].descriptor);
+                        for (const [charName, refVec] of Object.entries(database)) {
+                            if (!refVec) continue;
+                            let sim = matchDescriptor(desc128, refVec);
+                            if (sim > bestSim) {
+                                bestSim = sim;
+                                bestName = charName;
+                            }
+                        }
+                    }
+                    if (bestSim > 0.25) {
+                        log(`最高匹配分数: ${(bestSim*100).toFixed(1)}% (角色: ${bestName})，低于当前阈值 ${threshold}`, 'info');
+                        log(`建议将阈值降至 ${Math.max(0.2, bestSim - 0.05).toFixed(2)} 左右重试`, 'info');
+                    }
                     await fullImageMode(threshold);
                 } else {
                     displayResults(allMatches, detections.length);
@@ -852,7 +870,7 @@
             log('全图特征比对模式 (针对整体动漫风格)', 'info');
             try {
                 const img = els.previewImage;
-                // 使用多个检测器尝试获取人脸特征
+                // 使用多个检测器尝试获取人脸特征，确保链式调用正确
                 let dets = [];
                 const optionsList = [
                     { inputSize: 512, scoreThreshold: 0.12 },
@@ -863,6 +881,7 @@
                 for (const opt of optionsList) {
                     try {
                         const opts = new faceapi.TinyFaceDetectorOptions(opt);
+                        // 正确链式调用：detectAllFaces -> withFaceLandmarks -> withFaceDescriptors
                         const results = await faceapi.detectAllFaces(img, opts)
                             .withFaceLandmarks(true)
                             .withFaceDescriptors();
@@ -870,7 +889,9 @@
                             dets = results;
                             break;
                         }
-                    } catch(e) {}
+                    } catch(e) {
+                        console.warn('检测选项失败:', opt, e);
+                    }
                 }
                 
                 if (dets.length === 0) {
@@ -906,12 +927,28 @@
                     log(`全图匹配到 ${matches.length} 个候选`, 'success');
                     displayResults(matches, dets.length);
                 } else {
+                    // 显示最高分供参考
+                    let bestSim = 0;
+                    let bestName = '';
+                    for (const [charName, refVec] of Object.entries(database)) {
+                        if (!refVec) continue;
+                        let sim = matchDescriptor(mainDesc, refVec);
+                        if (sim > bestSim) {
+                            bestSim = sim;
+                            bestName = charName;
+                        }
+                    }
+                    if (bestSim > 0.25) {
+                        log(`最高匹配分数: ${(bestSim*100).toFixed(1)}% (角色: ${bestName})，低于阈值 ${threshold}`, 'info');
+                        log(`建议将阈值降至 ${Math.max(0.2, bestSim - 0.05).toFixed(2)} 左右重试`, 'info');
+                    }
                     log('未匹配任何角色，请尝试更清晰正脸或降低阈值', 'warning');
                     els.noResult.style.display = 'block';
                     els.faceCount.textContent = `${dets.length} 张人脸`;
                 }
             } catch(e) {
                 log(`全图匹配失败: ${e.message}`, 'error');
+                console.error(e);
                 els.noResult.style.display = 'block';
                 els.faceCount.textContent = '?';
             }
