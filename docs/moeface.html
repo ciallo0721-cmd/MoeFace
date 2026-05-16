@@ -151,7 +151,6 @@
         
         .preview-container {
             display: none;
-            position: relative;
             margin-top: 20px;
         }
         
@@ -510,15 +509,13 @@
         const CONFIG = {
             MODEL_URL: 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/',
             DETECTOR_OPTIONS: {
-                inputSize: 416,          // 增大输入尺寸提升动漫脸小脸检测率
-                scoreThreshold: 0.15     // 大幅降低阈值，让动漫脸更容易被检出
-            },
-            DEFAULT_THRESHOLD: 0.42,
-            MIN_FACE_SIZE: 16
+                inputSize: 512,
+                scoreThreshold: 0.12
+            }
         };
 
         let modelsReady = false;
-        let database = null;        // {角色名: 描述符数组(512维)}
+        let database = null;
         let currentImage = null;
         let detections = [];
 
@@ -587,47 +584,44 @@
             return denom > 0 ? dot / denom : 0;
         }
 
-        // 针对特征库512维和face-api输出128维的增强相似度（使用线性插值投影 + 加权补偿）
-        // 原理：128维是512维的压缩，通过双线性插值映射后计算相似度，并给予动漫脸优化补偿
-        function enhancedCosineSimilarity(emb128, emb512) {
-            if (!emb128 || !emb512) return 0;
-            if (emb128.length === 512 && emb512.length === 512) {
-                return cosineSimilarity(emb128, emb512);
+        // 128维 -> 512维映射相似度（用于动漫特征匹配）
+        function matchDescriptor(desc128, ref512) {
+            if (!desc128 || !ref512) return 0;
+            if (desc128.length === 512 && ref512.length === 512) {
+                return cosineSimilarity(desc128, ref512);
             }
-            if (emb128.length !== 128 || emb512.length !== 512) {
-                // 降级直接比对
-                const minLen = Math.min(emb128.length, emb512.length);
+            if (desc128.length !== 128 || ref512.length !== 512) {
+                const minLen = Math.min(desc128.length, ref512.length);
                 let dot = 0, n1 = 0, n2 = 0;
                 for (let i = 0; i < minLen; i++) {
-                    dot += emb128[i] * emb512[i];
-                    n1 += emb128[i] * emb128[i];
-                    n2 += emb512[i] * emb512[i];
+                    dot += desc128[i] * ref512[i];
+                    n1 += desc128[i] * desc128[i];
+                    n2 += ref512[i] * ref512[i];
                 }
                 const denom = Math.sqrt(n1) * Math.sqrt(n2);
                 return denom > 0 ? dot / denom : 0;
             }
             
-            // 128维 -> 投影至512维 (使用双三次插值思想)
-            const projected512 = new Array(512).fill(0);
+            // 128维投影到512维空间（线性插值）
+            const proj512 = new Array(512).fill(0);
             for (let i = 0; i < 512; i++) {
                 const srcIdx = (i / 512) * 128;
                 const idx1 = Math.floor(srcIdx);
                 const idx2 = Math.min(idx1 + 1, 127);
                 const frac = srcIdx - idx1;
-                const val1 = emb128[idx1] || 0;
-                const val2 = emb128[idx2] || 0;
-                projected512[i] = val1 * (1 - frac) + val2 * frac;
+                const val1 = desc128[idx1] || 0;
+                const val2 = desc128[idx2] || 0;
+                proj512[i] = val1 * (1 - frac) + val2 * frac;
             }
-            
-            let sim = cosineSimilarity(projected512, emb512);
-            // 动漫脸补偿: 部分动漫特征会略低，轻微提升0~0.1的增益，但不超过上限0.95
-            if (sim > 0.2 && sim < 0.7) {
-                sim = Math.min(0.92, sim * 1.12);
+            let sim = cosineSimilarity(proj512, ref512);
+            // 动漫脸补偿：轻微提升匹配度
+            if (sim > 0.2 && sim < 0.65) {
+                sim = Math.min(0.9, sim * 1.1);
             }
             return Math.min(0.98, Math.max(0, sim));
         }
 
-        // 加载特征库 (从 features/全部特征库.json)
+        // 加载特征库
         async function loadDatabase() {
             log('正在加载动漫角色特征库...');
             try {
@@ -739,7 +733,6 @@
 
         function syncCanvasSize() {
             const img = els.previewImage;
-            const wrapper = img.parentElement;
             const rect = img.getBoundingClientRect();
             els.canvasOverlay.width = rect.width;
             els.canvasOverlay.height = rect.height;
@@ -762,48 +755,36 @@
             log('已清空，可上传新图片', 'info');
         }
 
-        // 增强动漫人脸检测: 多次检测 + 多尺度
-        async function detectFacesRobust() {
+        // 检测人脸（正确链式调用）
+        async function detectFaces() {
             const img = els.previewImage;
-            const optionsLow = new faceapi.TinyFaceDetectorOptions({
-                inputSize: 416,
-                scoreThreshold: 0.12
-            });
-            const optionsMid = new faceapi.TinyFaceDetectorOptions({
-                inputSize: 608,
-                scoreThreshold: 0.1
-            });
+            const optionsLow = new faceapi.TinyFaceDetectorOptions({ inputSize: 512, scoreThreshold: 0.12 });
+            const optionsMid = new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.1 });
+            
             try {
-                let detections1 = await faceapi.detectAllFaces(img, optionsLow).withFaceLandmarks(true).withFaceDescriptors();
-                let detections2 = [];
-                if (detections1.length === 0) {
-                    detections2 = await faceapi.detectAllFaces(img, optionsMid).withFaceLandmarks(true).withFaceDescriptors();
+                // 先尝试低阈值检测
+                let results = await faceapi.detectAllFaces(img, optionsLow)
+                    .withFaceLandmarks(true)
+                    .withFaceDescriptors();
+                
+                if (results.length === 0) {
+                    log('尝试更高精度检测模式...', 'info');
+                    results = await faceapi.detectAllFaces(img, optionsMid)
+                        .withFaceLandmarks(true)
+                        .withFaceDescriptors();
                 }
-                let allDets = detections1.concat(detections2);
-                if (allDets.length === 0 && img.naturalWidth > 200) {
-                    // 最后尝试极小阈值
+                
+                if (results.length === 0 && img.naturalWidth > 200) {
+                    // 极低阈值兜底
                     const optionsUltra = new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.05 });
-                    allDets = await faceapi.detectAllFaces(img, optionsUltra).withFaceLandmarks(true).withFaceDescriptors();
+                    results = await faceapi.detectAllFaces(img, optionsUltra)
+                        .withFaceLandmarks(true)
+                        .withFaceDescriptors();
                 }
-                // 去重：基于框的重叠度
-                const unique = [];
-                for (let d of allDets) {
-                    let duplicate = false;
-                    for (let u of unique) {
-                        const box1 = d.detection.box;
-                        const box2 = u.detection.box;
-                        const inter = Math.max(0, Math.min(box1.x+box1.width, box2.x+box2.width) - Math.max(box1.x, box2.x)) *
-                                     Math.max(0, Math.min(box1.y+box1.height, box2.y+box2.height) - Math.max(box1.y, box2.y));
-                        const area1 = box1.width * box1.height;
-                        const area2 = box2.width * box2.height;
-                        const iou = inter / (area1 + area2 - inter);
-                        if (iou > 0.5) { duplicate = true; break; }
-                    }
-                    if (!duplicate) unique.push(d);
-                }
-                return unique;
-            } catch(e) {
-                log(`检测异常: ${e.message}`, 'error');
+                
+                return results;
+            } catch (err) {
+                log(`检测出错: ${err.message}`, 'error');
                 return [];
             }
         }
@@ -824,10 +805,10 @@
             
             try {
                 syncCanvasSize();
-                detections = await detectFacesRobust();
+                detections = await detectFaces();
                 
                 if (detections.length === 0) {
-                    log('未检测到明确人脸框 (动漫脸难检)，启动全图特征匹配模式...', 'warning');
+                    log('未检测到明确人脸框，启动全图特征匹配模式...', 'warning');
                     await fullImageMode(threshold);
                     return;
                 }
@@ -835,22 +816,14 @@
                 log(`检测到 ${detections.length} 个人脸区域`, 'success');
                 drawDetections();
                 
-                const allMatches = [];  // {name, similarity}
+                const allMatches = [];
                 for (let i = 0; i < detections.length; i++) {
                     const desc128 = Array.from(detections[i].descriptor);
                     log(`人脸 #${i+1} 特征提取完成，匹配特征库...`);
                     const faceMatches = [];
                     for (const [charName, refVec] of Object.entries(database)) {
                         if (!refVec || !Array.isArray(refVec)) continue;
-                        let sim = 0;
-                        if (refVec.length === 512 && desc128.length === 128) {
-                            sim = enhancedCosineSimilarity(desc128, refVec);
-                        } else if (refVec.length === desc128.length) {
-                            sim = cosineSimilarity(desc128, refVec);
-                        } else {
-                            // 尝试对齐
-                            sim = enhancedCosineSimilarity(desc128, refVec);
-                        }
+                        let sim = matchDescriptor(desc128, refVec);
                         if (sim >= threshold) {
                             faceMatches.push({ name: charName, similarity: sim });
                         }
@@ -860,7 +833,7 @@
                 }
                 
                 if (allMatches.length === 0) {
-                    log('人脸区域未匹配到特征库，尝试降低阈值或全图模式', 'warning');
+                    log('人脸区域未匹配到特征库，尝试全图模式', 'warning');
                     await fullImageMode(threshold);
                 } else {
                     displayResults(allMatches, detections.length);
@@ -868,6 +841,7 @@
             } catch (err) {
                 log(`识别异常: ${err.message}`, 'error');
                 console.error(err);
+                await fullImageMode(parseFloat(els.threshold.value));
             } finally {
                 els.recognizeBtn.disabled = false;
                 els.recognizeBtn.textContent = '🔍 开始识别';
@@ -876,38 +850,70 @@
         
         async function fullImageMode(threshold) {
             log('全图特征比对模式 (针对整体动漫风格)', 'info');
-            // 使用整张图片特征 (取整图检测最好的人脸区域或整体特征)
             try {
                 const img = els.previewImage;
-                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.08 });
-                let dets = await faceapi.detectAllFaces(img, options).withFaceDescriptors();
+                // 使用多个检测器尝试获取人脸特征
+                let dets = [];
+                const optionsList = [
+                    { inputSize: 512, scoreThreshold: 0.12 },
+                    { inputSize: 608, scoreThreshold: 0.08 },
+                    { inputSize: 416, scoreThreshold: 0.1 }
+                ];
+                
+                for (const opt of optionsList) {
+                    try {
+                        const opts = new faceapi.TinyFaceDetectorOptions(opt);
+                        const results = await faceapi.detectAllFaces(img, opts)
+                            .withFaceLandmarks(true)
+                            .withFaceDescriptors();
+                        if (results.length > 0) {
+                            dets = results;
+                            break;
+                        }
+                    } catch(e) {}
+                }
+                
                 if (dets.length === 0) {
-                    log('无法提取任何面部描述符，识别失败', 'error');
+                    log('无法提取面部描述符，请尝试更清晰的正面图', 'error');
                     els.noResult.style.display = 'block';
                     els.faceCount.textContent = '?';
                     return;
                 }
-                // 取最大的脸作为主要特征
-                let mainDesc = Array.from(dets[0].descriptor);
+                
+                // 取面积最大的脸作为主要特征
+                let maxFace = dets[0];
+                let maxArea = 0;
+                for (const d of dets) {
+                    const area = d.detection.box.width * d.detection.box.height;
+                    if (area > maxArea) {
+                        maxArea = area;
+                        maxFace = d;
+                    }
+                }
+                
+                const mainDesc = Array.from(maxFace.descriptor);
                 const matches = [];
                 for (const [charName, refVec] of Object.entries(database)) {
                     if (!refVec) continue;
-                    let sim = (refVec.length === 512 && mainDesc.length === 128) ? 
-                              enhancedCosineSimilarity(mainDesc, refVec) : cosineSimilarity(mainDesc, refVec);
-                    if (sim >= threshold) matches.push({ name: charName, similarity: sim });
+                    let sim = matchDescriptor(mainDesc, refVec);
+                    if (sim >= threshold) {
+                        matches.push({ name: charName, similarity: sim });
+                    }
                 }
                 matches.sort((a,b) => b.similarity - a.similarity);
+                
                 if (matches.length) {
                     log(`全图匹配到 ${matches.length} 个候选`, 'success');
-                    displayResults(matches, 1);
+                    displayResults(matches, dets.length);
                 } else {
-                    log('未匹配任何角色，请尝试更清晰正脸', 'warning');
+                    log('未匹配任何角色，请尝试更清晰正脸或降低阈值', 'warning');
                     els.noResult.style.display = 'block';
-                    els.faceCount.textContent = '?';
+                    els.faceCount.textContent = `${dets.length} 张人脸`;
                 }
             } catch(e) {
                 log(`全图匹配失败: ${e.message}`, 'error');
                 els.noResult.style.display = 'block';
+                els.faceCount.textContent = '?';
             }
         }
         
@@ -965,9 +971,19 @@
             });
         }
         
-        function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){if(m==='&') return '&amp;'; if(m==='<') return '&lt;'; if(m==='>') return '&gt;'; return m;}); }
+        function escapeHtml(str) { 
+            return str.replace(/[&<>]/g, function(m){
+                if(m==='&') return '&amp;';
+                if(m==='<') return '&lt;';
+                if(m==='>') return '&gt;';
+                return m;
+            });
+        }
         
-        window.addEventListener('resize', () => { if (els.previewContainer.classList.contains('show')) syncCanvasSize(); });
+        window.addEventListener('resize', () => { 
+            if (els.previewContainer.classList.contains('show')) syncCanvasSize(); 
+        });
+        
         document.addEventListener('DOMContentLoaded', () => {
             setupUploadHandlers();
             initialize();
