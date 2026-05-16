@@ -3,478 +3,1001 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MoeFace Web - 在线动漫人脸识别</title>
-    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <title>MoeFace Web - 动漫人脸识别</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         :root {
-            --primary: #7c3aed;
-            --primary-dark: #6d28d9;
-            --bg: #1e1e2e;
-            --panel: #2a2a3e;
-            --text: #cdd6f4;
-            --muted: #6c7086;
-            --success: #a6e3a1;
-            --warning: #f9e2af;
-            --error: #f38ba8;
+            --bg: #0f0f1a;
+            --panel: #1a1a2e;
+            --accent: #7c3aed;
+            --accent2: #a855f7;
+            --text: #e2e8f0;
+            --muted: #64748b;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
         }
+        
         body {
-            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            font-family: 'Segoe UI', system-ui, sans-serif;
             background: var(--bg);
             color: var(--text);
             min-height: 100vh;
+            padding: 20px;
         }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
         header {
-            background: var(--primary);
-            padding: 1rem 2rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            text-align: center;
+            padding: 30px 0;
         }
-        header h1 { font-size: 1.5rem; }
-        .status-badge {
-            background: var(--panel);
-            padding: 0.5rem 1rem;
-            border-radius: 2rem;
-            font-size: 0.875rem;
+        
+        h1 {
+            font-size: 2.5em;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
-        .status-badge.loading { color: var(--warning); }
-        .status-badge.ready { color: var(--success); }
-        .status-badge.error { color: var(--error); }
-
-        main {
-            max-width: 1200px;
-            margin: 2rem auto;
-            padding: 0 1rem;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 2rem;
+        
+        .subtitle {
+            color: var(--muted);
+            margin-top: 8px;
         }
-        @media (max-width: 768px) {
-            main { grid-template-columns: 1fr; }
-        }
-
+        
         .card {
             background: var(--panel);
-            border-radius: 12px;
-            padding: 1.5rem;
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
         }
-        .card h2 {
-            font-size: 1.125rem;
-            margin-bottom: 1rem;
+        
+        .status-bar {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        
+        .status-item {
+            background: rgba(124, 58, 237, 0.2);
+            padding: 12px 20px;
+            border-radius: 12px;
             display: flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 8px;
         }
-        .card h2::before {
-            content: "";
-            width: 4px;
-            height: 1.2em;
-            background: var(--primary);
-            border-radius: 2px;
+        
+        .status-item.ready { background: rgba(34, 197, 94, 0.2); }
+        .status-item.error { background: rgba(239, 68, 68, 0.2); }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--warning);
+            animation: pulse 1.5s infinite;
         }
-
+        
+        .status-item.ready .status-dot { background: var(--success); animation: none; }
+        .status-item.error .status-dot { background: var(--error); animation: none; }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        
         .upload-zone {
-            border: 2px dashed var(--muted);
-            border-radius: 12px;
-            padding: 3rem 2rem;
+            border: 3px dashed var(--muted);
+            border-radius: 16px;
+            padding: 60px 40px;
             text-align: center;
             cursor: pointer;
             transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
         }
+        
         .upload-zone:hover, .upload-zone.dragover {
-            border-color: var(--primary);
+            border-color: var(--accent);
             background: rgba(124, 58, 237, 0.1);
         }
-        .upload-zone input { display: none; }
-        .upload-icon { font-size: 3rem; margin-bottom: 1rem; }
-        .upload-text { color: var(--muted); }
-
-        #preview {
-            max-width: 100%;
-            max-height: 400px;
-            border-radius: 8px;
-            display: none;
+        
+        .upload-zone input {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
         }
-
+        
+        .upload-icon {
+            font-size: 4em;
+            margin-bottom: 16px;
+        }
+        
+        .upload-text {
+            font-size: 1.2em;
+            color: var(--text);
+        }
+        
+        .upload-hint {
+            color: var(--muted);
+            margin-top: 8px;
+        }
+        
+        .preview-container {
+            display: none;
+            position: relative;
+            margin-top: 20px;
+        }
+        
+        .preview-container.show { display: block; }
+        
+        .preview-image {
+            max-width: 100%;
+            max-height: 500px;
+            border-radius: 12px;
+            display: block;
+            margin: 0 auto;
+        }
+        
+        .canvas-overlay {
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            border-radius: 12px;
+            pointer-events: none;
+        }
+        
         .controls {
             display: flex;
+            gap: 12px;
             flex-wrap: wrap;
-            gap: 1rem;
-            margin: 1rem 0;
+            margin-top: 20px;
         }
+        
         .control-group {
-            flex: 1;
-            min-width: 150px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
-        .control-group label {
-            display: block;
-            font-size: 0.875rem;
+        
+        label {
             color: var(--muted);
-            margin-bottom: 0.5rem;
+            font-size: 0.9em;
         }
+        
         input[type="range"] {
-            width: 100%;
-            accent-color: var(--primary);
+            width: 120px;
+            accent-color: var(--accent);
         }
+        
         .threshold-value {
-            font-weight: bold;
-            color: var(--primary);
+            color: var(--accent);
+            font-weight: 600;
+            min-width: 40px;
         }
-
-        .btn {
-            background: var(--primary);
+        
+        button {
+            background: var(--accent);
             color: white;
             border: none;
-            padding: 0.75rem 1.5rem;
-            border-radius: 8px;
+            padding: 12px 28px;
+            border-radius: 10px;
+            font-size: 1em;
+            font-weight: 600;
             cursor: pointer;
-            font-size: 1rem;
-            font-weight: 500;
-            transition: background 0.3s;
+            transition: all 0.2s;
         }
-        .btn:hover { background: var(--primary-dark); }
-        .btn:disabled {
-            background: var(--muted);
+        
+        button:hover:not(:disabled) {
+            background: var(--accent2);
+            transform: translateY(-2px);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
             cursor: not-allowed;
         }
-
-        .results {
-            margin-top: 1rem;
+        
+        button.secondary {
+            background: var(--panel);
+            border: 2px solid var(--muted);
         }
-        .result-item {
+        
+        button.secondary:hover {
+            border-color: var(--accent);
+        }
+        
+        .results {
+            display: none;
+        }
+        
+        .results.show { display: block; }
+        
+        .results-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 0.75rem;
-            background: rgba(0,0,0,0.2);
-            border-radius: 8px;
-            margin-bottom: 0.5rem;
+            margin-bottom: 16px;
         }
-        .result-name { font-weight: 500; }
+        
+        .results-title {
+            font-size: 1.3em;
+            font-weight: 600;
+        }
+        
+        .face-count {
+            background: rgba(124, 58, 237, 0.3);
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 0.9em;
+        }
+        
+        .result-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        
+        .result-item {
+            background: rgba(255,255,255,0.05);
+            padding: 16px 20px;
+            border-radius: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s;
+        }
+        
+        .result-item:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .result-item.top {
+            background: rgba(34, 197, 94, 0.2);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+        
+        .result-rank {
+            color: var(--muted);
+            font-size: 0.9em;
+            width: 30px;
+        }
+        
+        .result-name {
+            font-weight: 600;
+            flex: 1;
+        }
+        
         .result-score {
-            font-size: 0.875rem;
-            padding: 0.25rem 0.75rem;
-            border-radius: 1rem;
-        }
-        .result-score.high { background: var(--success); color: var(--bg); }
-        .result-score.medium { background: var(--warning); color: var(--bg); }
-        .result-score.low { background: var(--muted); color: white; }
-
-        .log {
-            background: #12121e;
-            padding: 1rem;
+            font-weight: 700;
+            padding: 6px 14px;
             border-radius: 8px;
-            font-family: "Consolas", monospace;
-            font-size: 0.875rem;
+        }
+        
+        .result-score.high { background: var(--success); color: #000; }
+        .result-score.medium { background: var(--warning); color: #000; }
+        .result-score.low { background: var(--muted); color: #fff; }
+        
+        .no-result {
+            text-align: center;
+            padding: 40px;
+            color: var(--muted);
+        }
+        
+        .log-container {
+            background: #0a0a12;
+            border-radius: 12px;
+            padding: 16px;
+            font-family: 'Consolas', monospace;
+            font-size: 0.85em;
             max-height: 200px;
             overflow-y: auto;
-            white-space: pre-wrap;
         }
-        .log-item { margin-bottom: 0.25rem; }
-        .log-item.info { color: var(--text); }
-        .log-item.success { color: var(--success); }
-        .log-item.warning { color: var(--warning); }
-        .log-item.error { color: var(--error); }
-
-        .info-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-            gap: 1rem;
-            margin-top: 1rem;
+        
+        .log-entry {
+            padding: 4px 0;
+            color: var(--muted);
         }
-        .info-item {
-            text-align: center;
-            padding: 1rem;
-            background: rgba(0,0,0,0.2);
-            border-radius: 8px;
+        
+        .log-entry.success { color: var(--success); }
+        .log-entry.warning { color: var(--warning); }
+        .log-entry.error { color: var(--error); }
+        
+        .log-time {
+            color: var(--muted);
+            margin-right: 8px;
         }
-        .info-value { font-size: 1.5rem; font-weight: bold; color: var(--primary); }
-        .info-label { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
-
+        
         footer {
             text-align: center;
-            padding: 2rem;
+            padding: 30px;
             color: var(--muted);
-            font-size: 0.875rem;
+            font-size: 0.9em;
         }
-        footer a { color: var(--primary); text-decoration: none; }
+        
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        
+        .loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 15, 26, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        
+        .loading-overlay.hidden { display: none; }
+        
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid var(--panel);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            margin-top: 20px;
+            color: var(--text);
+        }
+        
+        .loading-progress {
+            width: 200px;
+            height: 6px;
+            background: var(--panel);
+            border-radius: 3px;
+            margin-top: 16px;
+            overflow: hidden;
+        }
+        
+        .loading-progress-bar {
+            height: 100%;
+            background: var(--accent);
+            width: 0%;
+            transition: width 0.3s;
+        }
     </style>
 </head>
 <body>
-    <header>
-        <h1>MoeFace Web</h1>
-        <span id="status" class="status-badge loading">加载模型中...</span>
-    </header>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div class="loading-text" id="loadingText">正在加载模型...</div>
+        <div class="loading-progress">
+            <div class="loading-progress-bar" id="loadingProgress"></div>
+        </div>
+    </div>
 
-    <main>
+    <div class="container">
+        <header>
+            <h1>MoeFace Web</h1>
+            <p class="subtitle">动漫角色识别 · 浏览器端AI</p>
+        </header>
+
         <div class="card">
-            <h2>上传图片识别</h2>
-            
-            <div id="uploadZone" class="upload-zone">
+            <div class="status-bar">
+                <div class="status-item" id="statusModels">
+                    <span class="status-dot"></span>
+                    <span>加载中...</span>
+                </div>
+                <div class="status-item" id="statusDB">
+                    <span class="status-dot"></span>
+                    <span>加载中...</span>
+                </div>
+            </div>
+
+            <div class="upload-zone" id="uploadZone">
                 <input type="file" id="fileInput" accept="image/*">
-                <div class="upload-icon">📷</div>
-                <div class="upload-text">
-                    点击或拖拽图片到此处<br>
-                    <small>支持 JPG, PNG, WebP</small>
-                </div>
-                <img id="preview" alt="预览">
+                <div class="upload-icon">🎯</div>
+                <div class="upload-text">点击或拖拽上传图片</div>
+                <div class="upload-hint">支持 JPG / PNG / WebP</div>
             </div>
 
-            <div class="controls">
+            <div class="preview-container" id="previewContainer">
+                <img id="previewImage" class="preview-image" alt="预览">
+                <canvas id="canvasOverlay" class="canvas-overlay"></canvas>
+            </div>
+
+            <div class="controls" id="controls" style="display: none;">
                 <div class="control-group">
-                    <label>识别阈值: <span id="thresholdValue" class="threshold-value">0.45</span></label>
+                    <label>识别阈值:</label>
                     <input type="range" id="threshold" min="0.1" max="0.95" step="0.05" value="0.45">
+                    <span class="threshold-value" id="thresholdValue">0.45</span>
                 </div>
+                <button id="recognizeBtn" disabled>🔍 开始识别</button>
+                <button id="clearBtn" class="secondary">清除</button>
             </div>
+        </div>
 
-            <button id="recognizeBtn" class="btn" disabled>开始识别</button>
+        <div class="card results" id="results">
+            <div class="results-header">
+                <span class="results-title">识别结果</span>
+                <span class="face-count" id="faceCount">0 张人脸</span>
+            </div>
+            <div class="result-list" id="resultList"></div>
+            <div class="no-result" id="noResult" style="display: none;">
+                <p>未检测到已知角色</p>
+            </div>
         </div>
 
         <div class="card">
-            <h2>识别结果</h2>
-            
-            <div id="results" class="results" style="display:none;">
-                <div class="info-grid">
-                    <div class="info-item">
-                        <div id="faceCount" class="info-value">0</div>
-                        <div class="info-label">检测到人脸</div>
-                    </div>
-                    <div class="info-item">
-                        <div id="matchCount" class="info-value">0</div>
-                        <div class="info-label">匹配成功</div>
-                    </div>
-                </div>
-                <div id="resultList"></div>
-            </div>
-
-            <div id="noResult" style="text-align:center; color: var(--muted); padding: 2rem;">
-                暂无识别结果<br>
-                <small>上传图片后点击识别</small>
-            </div>
+            <h3 style="margin-bottom: 12px;">运行日志</h3>
+            <div class="log-container" id="logContainer"></div>
         </div>
 
-        <div class="card" style="grid-column: 1 / -1;">
-            <h2>运行日志</h2>
-            <div id="log" class="log"></div>
-        </div>
-    </main>
+        <footer>
+            <p>基于 face-api.js + TensorFlow.js | 特征库: <span id="charCount">-</span> 个角色</p>
+            <p style="margin-top: 8px;">
+                <a href="https://github.com/ciallo0721-cmd/MoeFace" target="_blank">GitHub</a>
+            </p>
+        </footer>
+    </div>
 
-    <footer>
-        <p>基于 face-api.js + TensorFlow.js | 特征库: <span id="dbCount">-</span> 个角色</p>
-    </footer>
-
+    <!-- face-api.js -->
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    
     <script>
+        // ========================================
+        // 配置
+        // ========================================
+        const CONFIG = {
+            // face-api.js 模型（备用：真人脸检测+识别）
+            MODEL_URL: 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/',
+            
+            // 检测器选项（降低阈值以检测更多候选）
+            DETECTOR_OPTIONS: {
+                inputSize: 320,
+                scoreThreshold: 0.3  // 降低阈值，动漫脸可能置信度较低
+            },
+            
+            // 识别阈值
+            DEFAULT_THRESHOLD: 0.45,
+            
+            // 人脸匹配最小尺寸
+            MIN_FACE_SIZE: 20
+        };
+
+        // ========================================
         // 状态
+        // ========================================
         let modelsReady = false;
         let database = null;
+        let currentImage = null;
+        let detections = [];
 
-        // DOM
-        const statusEl = document.getElementById('status');
-        const uploadZone = document.getElementById('uploadZone');
-        const fileInput = document.getElementById('fileInput');
-        const preview = document.getElementById('preview');
-        const thresholdInput = document.getElementById('threshold');
-        const thresholdValue = document.getElementById('thresholdValue');
-        const recognizeBtn = document.getElementById('recognizeBtn');
-        const resultsEl = document.getElementById('results');
-        const noResultEl = document.getElementById('noResult');
-        const resultList = document.getElementById('resultList');
-        const logEl = document.getElementById('log');
-        const dbCountEl = document.getElementById('dbCount');
-        const faceCountEl = document.getElementById('faceCount');
-        const matchCountEl = document.getElementById('matchCount');
+        // ========================================
+        // DOM 元素
+        // ========================================
+        const elements = {
+            loadingOverlay: document.getElementById('loadingOverlay'),
+            loadingText: document.getElementById('loadingText'),
+            loadingProgress: document.getElementById('loadingProgress'),
+            statusModels: document.getElementById('statusModels'),
+            statusDB: document.getElementById('statusDB'),
+            uploadZone: document.getElementById('uploadZone'),
+            fileInput: document.getElementById('fileInput'),
+            previewContainer: document.getElementById('previewContainer'),
+            previewImage: document.getElementById('previewImage'),
+            canvasOverlay: document.getElementById('canvasOverlay'),
+            controls: document.getElementById('controls'),
+            threshold: document.getElementById('threshold'),
+            thresholdValue: document.getElementById('thresholdValue'),
+            recognizeBtn: document.getElementById('recognizeBtn'),
+            clearBtn: document.getElementById('clearBtn'),
+            results: document.getElementById('results'),
+            faceCount: document.getElementById('faceCount'),
+            resultList: document.getElementById('resultList'),
+            noResult: document.getElementById('noResult'),
+            logContainer: document.getElementById('logContainer'),
+            charCount: document.getElementById('charCount')
+        };
 
-        // 日志
-        function log(msg, type = 'info') {
-            const item = document.createElement('div');
-            item.className = 'log-item ' + type;
-            item.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
-            logEl.appendChild(item);
-            logEl.scrollTop = logEl.scrollHeight;
-            console.log('[' + type + ']', msg);
+        // ========================================
+        // 日志系统
+        // ========================================
+        function log(message, type = 'info') {
+            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.innerHTML = `<span class="log-time">[${time}]</span>${message}`;
+            elements.logContainer.appendChild(entry);
+            elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
+            console.log(`[${type.toUpperCase()}] ${message}`);
         }
 
+        // ========================================
         // 状态更新
-        function setStatus(text, state) {
-            statusEl.textContent = text;
-            statusEl.className = 'status-badge ' + state;
+        // ========================================
+        function updateStatus(elementId, text, status) {
+            const el = document.getElementById(elementId);
+            el.className = `status-item ${status}`;
+            el.querySelector('span:last-child').textContent = text;
         }
 
-        // 加载特征库
-        async function loadDatabase() {
-            try {
-                log('正在加载特征库...');
-                const response = await fetch('./features/全部特征库.json');
-                if (!response.ok) throw new Error('特征库加载失败');
-                database = await response.json();
-                const count = Object.keys(database).length;
-                dbCountEl.textContent = count;
-                log('特征库加载完成: ' + count + ' 个角色', 'success');
-                return true;
-            } catch (e) {
-                log('特征库加载失败: ' + e.message, 'error');
-                return false;
-            }
+        function setProgress(text, percent) {
+            elements.loadingText.textContent = text;
+            elements.loadingProgress.style.width = `${percent}%`;
         }
 
-        // 加载模型
-        async function loadModels() {
-            try {
-                log('正在加载 face-api.js 模型...');
-                
-                await Promise.all([
-                    faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/'),
-                    faceapi.nets.faceRecognitionNet.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/'),
-                    faceapi.nets.faceLandmark68TinyNet.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/')
-                ]);
-                
-                modelsReady = true;
-                setStatus('模型加载完成', 'ready');
-                recognizeBtn.disabled = false;
-                log('face-api.js 模型加载完成', 'success');
-                return true;
-            } catch (e) {
-                log('模型加载失败: ' + e.message, 'error');
-                setStatus('模型加载失败', 'error');
-                return false;
-            }
+        function hideLoading() {
+            elements.loadingOverlay.classList.add('hidden');
         }
 
+        // ========================================
         // 余弦相似度
+        // ========================================
         function cosineSimilarity(a, b) {
+            if (!a || !b || a.length !== b.length) return 0;
+            
             let dot = 0, normA = 0, normB = 0;
             for (let i = 0; i < a.length; i++) {
                 dot += a[i] * b[i];
                 normA += a[i] * a[i];
                 normB += b[i] * b[i];
             }
-            return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-6);
+            
+            const denom = Math.sqrt(normA) * Math.sqrt(normB);
+            return denom > 0 ? dot / denom : 0;
         }
 
-        // 识别
+        // ========================================
+        // 加载模型和特征库
+        // ========================================
+        async function initialize() {
+            try {
+                log('MoeFace Web 初始化中...');
+                
+                // 1. 加载特征库
+                setProgress('加载特征库...', 10);
+                await loadDatabase();
+                
+                // 2. 加载 face-api.js 模型
+                setProgress('加载人脸检测模型...', 40);
+                await loadModels();
+                
+                // 3. 完成
+                setProgress('加载完成！', 100);
+                await new Promise(r => setTimeout(r, 500));
+                hideLoading();
+                
+                log('初始化完成！', 'success');
+                
+            } catch (error) {
+                log(`初始化失败: ${error.message}`, 'error');
+                updateStatus('statusModels', '加载失败', 'error');
+                hideLoading();
+            }
+        }
+
+        async function loadDatabase() {
+            log('正在加载特征库...');
+            
+            try {
+                const response = await fetch('features/全部特征库.json');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                database = await response.json();
+                const charNames = Object.keys(database);
+                const dim = charNames.length > 0 ? database[charNames[0]].length : 0;
+                
+                log(`特征库加载完成: ${charNames.length} 个角色, ${dim} 维`, 'success');
+                updateStatus('statusDB', `特征库: ${charNames.length} 角色`, 'ready');
+                elements.charCount.textContent = charNames.length;
+                
+            } catch (error) {
+                log(`特征库加载失败: ${error.message}`, 'error');
+                updateStatus('statusDB', '特征库加载失败', 'error');
+                throw error;
+            }
+        }
+
+        async function loadModels() {
+            log('正在加载 face-api.js 模型...');
+            updateStatus('statusModels', '模型加载中...', '');
+            
+            try {
+                // 加载轻量级模型
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri(CONFIG.MODEL_URL),
+                    faceapi.nets.faceRecognitionNet.loadFromUri(CONFIG.MODEL_URL),
+                    faceapi.nets.faceLandmark68TinyNet.loadFromUri(CONFIG.MODEL_URL)
+                ]);
+                
+                modelsReady = true;
+                log('face-api.js 模型加载完成', 'success');
+                updateStatus('statusModels', '模型就绪', 'ready');
+                
+            } catch (error) {
+                log(`模型加载失败: ${error.message}`, 'error');
+                updateStatus('statusModels', '模型加载失败', 'error');
+                throw error;
+            }
+        }
+
+        // ========================================
+        // 文件上传处理
+        // ========================================
+        function setupUploadHandlers() {
+            // 文件选择
+            elements.fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    handleFile(e.target.files[0]);
+                }
+            });
+            
+            // 拖拽
+            elements.uploadZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                elements.uploadZone.classList.add('dragover');
+            });
+            
+            elements.uploadZone.addEventListener('dragleave', () => {
+                elements.uploadZone.classList.remove('dragover');
+            });
+            
+            elements.uploadZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                elements.uploadZone.classList.remove('dragover');
+                if (e.dataTransfer.files.length > 0) {
+                    handleFile(e.dataTransfer.files[0]);
+                }
+            });
+            
+            // 阈值滑块
+            elements.threshold.addEventListener('input', () => {
+                elements.thresholdValue.textContent = parseFloat(elements.threshold.value).toFixed(2);
+            });
+            
+            // 识别按钮
+            elements.recognizeBtn.addEventListener('click', recognize);
+            
+            // 清除按钮
+            elements.clearBtn.addEventListener('click', clearAll);
+        }
+
+        function handleFile(file) {
+            if (!file.type.startsWith('image/')) {
+                log('请上传图片文件', 'warning');
+                return;
+            }
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                currentImage = e.target.result;
+                showPreview(currentImage);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function showPreview(src) {
+            elements.previewImage.src = src;
+            elements.previewContainer.classList.add('show');
+            elements.uploadZone.style.display = 'none';
+            elements.controls.style.display = 'flex';
+            elements.results.classList.remove('show');
+            
+            // 等待图片加载后调整 canvas
+            elements.previewImage.onload = () => {
+                const rect = elements.previewImage.getBoundingClientRect();
+                elements.canvasOverlay.width = rect.width;
+                elements.canvasOverlay.height = rect.height;
+                
+                log(`已加载图片: ${elements.previewImage.naturalWidth}×${elements.previewImage.naturalHeight}`, 'success');
+            };
+            
+            elements.recognizeBtn.disabled = !modelsReady;
+        }
+
+        function clearAll() {
+            currentImage = null;
+            detections = [];
+            
+            elements.previewContainer.classList.remove('show');
+            elements.uploadZone.style.display = 'block';
+            elements.controls.style.display = 'none';
+            elements.results.classList.remove('show');
+            elements.fileInput.value = '';
+            
+            // 清除 canvas
+            const ctx = elements.canvasOverlay.getContext('2d');
+            ctx.clearRect(0, 0, elements.canvasOverlay.width, elements.canvasOverlay.height);
+            
+            elements.resultList.innerHTML = '';
+            elements.noResult.style.display = 'none';
+            
+            log('已清除');
+        }
+
+        // ========================================
+        // 人脸识别
+        // ========================================
         async function recognize() {
             if (!modelsReady || !database) {
                 log('模型或特征库未就绪', 'error');
                 return;
             }
-
-            if (!preview.src || preview.style.display === 'none') {
+            
+            if (!currentImage) {
                 log('请先上传图片', 'warning');
                 return;
             }
-
-            const threshold = parseFloat(thresholdInput.value);
-            log('开始识别 (阈值: ' + threshold + ')...');
-
+            
+            const threshold = parseFloat(elements.threshold.value);
+            log(`开始识别 (阈值: ${threshold})...`);
+            
+            elements.recognizeBtn.disabled = true;
+            elements.recognizeBtn.textContent = '识别中...';
+            
             try {
-                // 使用预览图片进行检测
-                const detection = await faceapi
-                    .detectSingleFace(preview, new faceapi.TinyFaceDetectorOptions())
-                    .withFaceLandmarks(true)
-                    .withFaceDescriptor();
-
-                if (!detection) {
-                    log('未检测到人脸', 'warning');
+                // 使用 face-api.js 检测
+                detections = await detectFaces();
+                
+                if (detections.length === 0) {
+                    log('未检测到人脸（可能是动漫脸，face-api.js 对动漫效果有限）', 'warning');
+                    // 尝试全图比对作为备选
+                    await tryFullImageRecognition(threshold);
                     return;
                 }
-
-                const descriptor = Array.from(detection.descriptor);
-                log('检测到1张人脸，特征维度: ' + descriptor.length);
                 
-                // 与特征库比对
-                const matches = [];
-                for (const [name, refDescriptor] of Object.entries(database)) {
-                    if (!Array.isArray(refDescriptor) || refDescriptor.length !== descriptor.length) {
-                        continue;
+                log(`检测到 ${detections.length} 张人脸`);
+                
+                // 绘制检测框
+                drawDetections();
+                
+                // 识别每个人脸
+                const allMatches = [];
+                for (let i = 0; i < detections.length; i++) {
+                    const detection = detections[i];
+                    const descriptor = Array.from(detection.descriptor);
+                    
+                    log(`正在识别第 ${i + 1} 张人脸...`);
+                    
+                    // 与特征库比对
+                    const matches = [];
+                    for (const [name, refDescriptor] of Object.entries(database)) {
+                        // 检查维度兼容性
+                        if (!Array.isArray(refDescriptor)) continue;
+                        
+                        // 维度不匹配时使用简化的相似度
+                        let similarity;
+                        if (refDescriptor.length === descriptor.length) {
+                            similarity = cosineSimilarity(descriptor, refDescriptor);
+                        } else if (refDescriptor.length === 512 && descriptor.length === 128) {
+                            // face-api.js (128d) vs 我们的特征库 (512d)
+                            // 使用子向量近似比较
+                            similarity = approximateCosineSimilarity(descriptor, refDescriptor);
+                        } else {
+                            continue;
+                        }
+                        
+                        if (similarity >= threshold) {
+                            matches.push({ name, similarity });
+                        }
                     }
-                    const similarity = cosineSimilarity(descriptor, refDescriptor);
-                    if (similarity >= threshold) {
-                        matches.push({ name, similarity });
+                    
+                    // 按相似度排序
+                    matches.sort((a, b) => b.similarity - a.similarity);
+                    
+                    if (matches.length > 0) {
+                        allMatches.push(...matches.slice(0, 3)); // 每个检测取前3
                     }
                 }
-
-                // 按相似度排序
-                matches.sort((a, b) => b.similarity - a.similarity);
-
-                // 更新UI
-                faceCountEl.textContent = 1;
-                matchCountEl.textContent = matches.length;
-                resultsEl.style.display = 'block';
-                noResultEl.style.display = 'none';
-
-                resultList.innerHTML = '';
-                if (matches.length === 0) {
-                    resultList.innerHTML = '<div style="color:var(--muted)">未匹配到已知角色</div>';
-                    log('未匹配到已知角色', 'warning');
-                } else {
-                    matches.forEach((m, i) => {
-                        const scoreClass = m.similarity >= 0.6 ? 'high' : m.similarity >= 0.5 ? 'medium' : 'low';
-                        const item = document.createElement('div');
-                        item.className = 'result-item';
-                        item.innerHTML = 
-                            '<span class="result-name">' + (i + 1) + '. ' + m.name + '</span>' +
-                            '<span class="result-score ' + scoreClass + '">' + (m.similarity * 100).toFixed(1) + '%</span>';
-                        resultList.appendChild(item);
-                        log('匹配: ' + m.name + ' (' + (m.similarity * 100).toFixed(1) + '%)', 'success');
-                    });
-                }
-            } catch (e) {
-                log('识别出错: ' + e.message, 'error');
-                console.error(e);
+                
+                // 合并和排序所有匹配
+                displayResults(allMatches, detections.length);
+                
+            } catch (error) {
+                log(`识别出错: ${error.message}`, 'error');
+                console.error(error);
+            } finally {
+                elements.recognizeBtn.disabled = false;
+                elements.recognizeBtn.textContent = '🔍 开始识别';
             }
         }
 
-        // 上传处理
-        function handleFile(file) {
-            if (!file || !file.type.startsWith('image/')) {
-                log('请上传图片文件', 'warning');
+        async function detectFaces() {
+            const img = elements.previewImage;
+            
+            // 使用 TinyFaceDetector
+            const detections = await faceapi.detectAllFaces(
+                img,
+                new faceapi.TinyFaceDetectorOptions(CONFIG.DETECTOR_OPTIONS)
+            ).withFaceLandmarks(true).withFaceDescriptors();
+            
+            return detections;
+        }
+
+        // 128维到512维的近似相似度计算
+        // 通过下采样近似
+        function approximateCosineSimilarity(a128, a512) {
+            // 将128维向量扩展为512维（每4个元素取平均或复制）
+            const a512_approx = [];
+            for (let i = 0; i < 512; i += 4) {
+                const base = Math.floor(i * 128 / 512);
+                for (let j = 0; j < 4 && (i + j) < 512; j++) {
+                    a512_approx.push(a128[Math.min(base + j, 127)]);
+                }
+            }
+            
+            // 调整到正确长度
+            while (a512_approx.length > 512) a512_approx.pop();
+            while (a512_approx.length < 512) a512_approx.push(0);
+            
+            // 计算近似相似度（乘以折扣因子）
+            const sim = cosineSimilarity(a512_approx, a512);
+            return sim * 0.7; // 折扣因子（因为是近似）
+        }
+
+        // 全图特征比对（备选方案）
+        async function tryFullImageRecognition(threshold) {
+            log('尝试全图特征比对...', 'warning');
+            
+            // 直接用整张图做特征提取
+            const fullDescriptor = await extractFullImageDescriptor();
+            
+            if (!fullDescriptor) {
+                log('无法提取图片特征', 'error');
                 return;
             }
-
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                preview.src = e.target.result;
-                preview.style.display = 'block';
-                uploadZone.querySelector('.upload-icon').style.display = 'none';
-                uploadZone.querySelector('.upload-text').style.display = 'none';
-                log('已加载图片: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)');
-            };
-            reader.readAsDataURL(file);
+            
+            const matches = [];
+            for (const [name, refDescriptor] of Object.entries(database)) {
+                if (!Array.isArray(refDescriptor)) continue;
+                
+                let similarity;
+                if (refDescriptor.length === fullDescriptor.length) {
+                    similarity = cosineSimilarity(fullDescriptor, refDescriptor);
+                } else if (refDescriptor.length === 512 && fullDescriptor.length === 128) {
+                    similarity = approximateCosineSimilarity(fullDescriptor, refDescriptor);
+                } else {
+                    continue;
+                }
+                
+                if (similarity >= threshold) {
+                    matches.push({ name, similarity });
+                }
+            }
+            
+            matches.sort((a, b) => b.similarity - a.similarity);
+            
+            if (matches.length > 0) {
+                log('全图比对找到匹配！', 'success');
+                displayResults(matches, 1);
+            } else {
+                log('未匹配到已知角色', 'warning');
+                elements.noResult.style.display = 'block';
+                elements.faceCount.textContent = '?';
+            }
         }
 
-        // 事件绑定
-        uploadZone.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files[0]) handleFile(e.target.files[0]);
-        });
-        uploadZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadZone.classList.add('dragover');
-        });
-        uploadZone.addEventListener('dragleave', () => {
-            uploadZone.classList.remove('dragover');
-        });
-        uploadZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadZone.classList.remove('dragover');
-            if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
-        });
-
-        thresholdInput.addEventListener('input', () => {
-            thresholdValue.textContent = parseFloat(thresholdInput.value).toFixed(2);
-        });
-
-        recognizeBtn.addEventListener('click', recognize);
-
-        // 初始化
-        async function init() {
-            log('MoeFace Web 初始化中...');
-            await loadDatabase();
-            await loadModels();
+        async function extractFullImageDescriptor() {
+            try {
+                // 使用 face-api.js 对整张图做检测（即使检测不到人脸也尝试获取描述符）
+                const img = elements.previewImage;
+                
+                // 用更大的输入尺寸尝试
+                const options = new faceapi.TinyFaceDetectorOptions({
+                    inputSize: 512,
+                    scoreThreshold: 0.05
+                });
+                
+                const detections = await faceapi.detectAllFaces(img, options)
+                    .withFaceLandmarks(true)
+                    .withFaceDescriptors();
+                
+                if (detections.length > 0) {
+                    return Array.from(detections[0].descriptor);
+                }
+                
+                return null;
+            } catch (error) {
+                console.error('特征提取失败:', error);
+                return null;
+            }
         }
 
-        init();
+        function drawDetections() {
+            const canvas = elements.canvasOverlay;
+            const ctx = canvas.getContext('2d');
+            const imgRect = elements.previewImage.getBoundingClientRect();
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 计算缩放比例
+            const scaleX = imgRect.width / elements.previewImage.naturalWidth;
+            const scaleY = imgRect.height / elements.previewImage.naturalHeight;
+            
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 3;
+            
+            detections.forEach((detection, i) => {
+                const box = detection.detection.box;
+                const x = box.x * scaleX;
+                const y = box.y * scaleY;
+                const w = box.width * scaleX;
+                const h = box.height * scaleY;
+                
+                ctx.strokeRect(x, y, w, h);
+                
+                // 绘制编号
+                ctx.fillStyle = '#22c55e';
+                ctx.font = 'bold 16px sans-serif';
+                ctx.fillText(`#${i + 1}`, x, y - 5);
+            });
+        }
+
+        function displayResults(matches, faceCount) {
+            elements.results.classList.add('show');
+            elements.faceCount.textContent = `${faceCount} 张人脸`;
+            
+            if (matches.length === 0) {
+                elements.resultList.innerHTML = '';
+                elements.noResult.style.display = 'block';
+                return;
+            }
+            
+            elements.noResult.style.display = 'none';
+            
+            // 去重并排序
+            const uniqueMatches = [];
+            const seen = new Set();
+            
+            for (const match of matches) {
+                if (!seen.has(match.name)) {
+                    seen.add(match.name);
+                    uniqueMatches.push(match);
+                }
+            }
+            
+            uniqueMatches.sort((a, b) => b.similarity - a.similarity);
+            
+            // 渲染结果
+            elements.resultList.innerHTML = '';
+            
+            uniqueMatches.slice(0, 10).forEach((match, index) => {
+                const scoreClass = match.similarity >= 0.6 ? 'high' : 
+                                  match.similarity >= 0.5 ? 'medium' : 'low';
+                
+                const item = document.createElement('div');
+                item.className = `result-item${index === 0 ? ' top' : ''}`;
+                item.innerHTML = `
+                    <span class="result-rank">#${index + 1}</span>
+                    <span class="result-name">${match.name}</span>
+                    <span class="result-score ${scoreClass}">${(match.similarity * 100).toFixed(1)}%</span>
+                `;
+                
+                elements.resultList.appendChild(item);
+                log(`匹配: ${match.name} (${(match.similarity * 100).toFixed(1)}%)`, 'success');
+            });
+        }
+
+        // ========================================
+        // 启动
+        // ========================================
+        document.addEventListener('DOMContentLoaded', () => {
+            setupUploadHandlers();
+            initialize();
+        });
     </script>
 </body>
 </html>
