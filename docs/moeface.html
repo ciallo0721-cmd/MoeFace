@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MoeFace Web - 在线动漫人脸识别</title>
     <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
-    <script>
+    <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
             --primary: #7c3aed;
@@ -138,10 +138,6 @@
             background: var(--muted);
             cursor: not-allowed;
         }
-        .btn-secondary {
-            background: var(--panel);
-            border: 1px solid var(--muted);
-        }
 
         .results {
             margin-top: 1rem;
@@ -217,7 +213,7 @@
             
             <div id="uploadZone" class="upload-zone">
                 <input type="file" id="fileInput" accept="image/*">
-                <div class="upload-icon">&#128247;</div>
+                <div class="upload-icon">📷</div>
                 <div class="upload-text">
                     点击或拖拽图片到此处<br>
                     <small>支持 JPG, PNG, WebP</small>
@@ -272,7 +268,6 @@
         // 状态
         let modelsReady = false;
         let database = null;
-        const THRESHOLD_DEFAULT = 0.45;
 
         // DOM
         const statusEl = document.getElementById('status');
@@ -293,32 +288,32 @@
         // 日志
         function log(msg, type = 'info') {
             const item = document.createElement('div');
-            item.className = `log-item ${type}`;
-            item.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            item.className = 'log-item ' + type;
+            item.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
             logEl.appendChild(item);
             logEl.scrollTop = logEl.scrollHeight;
-            console.log(`[${type}]`, msg);
+            console.log('[' + type + ']', msg);
         }
 
         // 状态更新
         function setStatus(text, state) {
             statusEl.textContent = text;
-            statusEl.className = `status-badge ${state}`;
+            statusEl.className = 'status-badge ' + state;
         }
 
         // 加载特征库
         async function loadDatabase() {
             try {
                 log('正在加载特征库...');
-                const response = await fetch('features/全部特征库.json');
+                const response = await fetch('./features/全部特征库.json');
                 if (!response.ok) throw new Error('特征库加载失败');
                 database = await response.json();
                 const count = Object.keys(database).length;
                 dbCountEl.textContent = count;
-                log(`特征库加载完成: ${count} 个角色`, 'success');
+                log('特征库加载完成: ' + count + ' 个角色', 'success');
                 return true;
             } catch (e) {
-                log(`特征库加载失败: ${e.message}`, 'error');
+                log('特征库加载失败: ' + e.message, 'error');
                 return false;
             }
         }
@@ -327,13 +322,11 @@
         async function loadModels() {
             try {
                 log('正在加载 face-api.js 模型...');
-                // 使用 @vladmandic/face-api 的CDN（兼容性更好）
-                const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
                 
                 await Promise.all([
-                    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-                    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-                    faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL)
+                    faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/'),
+                    faceapi.nets.faceRecognitionNet.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/'),
+                    faceapi.nets.faceLandmark68TinyNet.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/')
                 ]);
                 
                 modelsReady = true;
@@ -342,7 +335,7 @@
                 log('face-api.js 模型加载完成', 'success');
                 return true;
             } catch (e) {
-                log(`模型加载失败: ${e.message}`, 'error');
+                log('模型加载失败: ' + e.message, 'error');
                 setStatus('模型加载失败', 'error');
                 return false;
             }
@@ -372,10 +365,10 @@
             }
 
             const threshold = parseFloat(thresholdInput.value);
-            log(`开始识别 (阈值: ${threshold})...`);
+            log('开始识别 (阈值: ' + threshold + ')...');
 
             try {
-                // 使用预览图片元素进行检测
+                // 使用预览图片进行检测
                 const detection = await faceapi
                     .detectSingleFace(preview, new faceapi.TinyFaceDetectorOptions())
                     .withFaceLandmarks(true)
@@ -387,12 +380,11 @@
                 }
 
                 const descriptor = Array.from(detection.descriptor);
-                log(`检测到1张人脸，特征维度: ${descriptor.length}`);
+                log('检测到1张人脸，特征维度: ' + descriptor.length);
                 
                 // 与特征库比对
                 const matches = [];
                 for (const [name, refDescriptor] of Object.entries(database)) {
-                    // 确保维度匹配
                     if (!Array.isArray(refDescriptor) || refDescriptor.length !== descriptor.length) {
                         continue;
                     }
@@ -420,16 +412,15 @@
                         const scoreClass = m.similarity >= 0.6 ? 'high' : m.similarity >= 0.5 ? 'medium' : 'low';
                         const item = document.createElement('div');
                         item.className = 'result-item';
-                        item.innerHTML = `
-                            <span class="result-name">${i + 1}. ${m.name}</span>
-                            <span class="result-score ${scoreClass}">${(m.similarity * 100).toFixed(1)}%</span>
-                        `;
+                        item.innerHTML = 
+                            '<span class="result-name">' + (i + 1) + '. ' + m.name + '</span>' +
+                            '<span class="result-score ' + scoreClass + '">' + (m.similarity * 100).toFixed(1) + '%</span>';
                         resultList.appendChild(item);
-                        log(`匹配: ${m.name} (${(m.similarity * 100).toFixed(1)}%)`, 'success');
+                        log('匹配: ' + m.name + ' (' + (m.similarity * 100).toFixed(1) + '%)', 'success');
                     });
                 }
             } catch (e) {
-                log(`识别出错: ${e.message}`, 'error');
+                log('识别出错: ' + e.message, 'error');
                 console.error(e);
             }
         }
@@ -447,7 +438,7 @@
                 preview.style.display = 'block';
                 uploadZone.querySelector('.upload-icon').style.display = 'none';
                 uploadZone.querySelector('.upload-text').style.display = 'none';
-                log(`已加载图片: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+                log('已加载图片: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)');
             };
             reader.readAsDataURL(file);
         }
