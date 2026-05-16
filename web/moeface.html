@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MoeFace Web - 在线动漫人脸识别</title>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <script>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary: #7c3aed;
+            --primary-dark: #6d28d9;
+            --bg: #1e1e2e;
+            --panel: #2a2a3e;
+            --text: #cdd6f4;
+            --muted: #6c7086;
+            --success: #a6e3a1;
+            --warning: #f9e2af;
+            --error: #f38ba8;
+        }
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        header {
+            background: var(--primary);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        header h1 { font-size: 1.5rem; }
+        .status-badge {
+            background: var(--panel);
+            padding: 0.5rem 1rem;
+            border-radius: 2rem;
+            font-size: 0.875rem;
+        }
+        .status-badge.loading { color: var(--warning); }
+        .status-badge.ready { color: var(--success); }
+        .status-badge.error { color: var(--error); }
+
+        main {
+            max-width: 1200px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+        @media (max-width: 768px) {
+            main { grid-template-columns: 1fr; }
+        }
+
+        .card {
+            background: var(--panel);
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+        .card h2 {
+            font-size: 1.125rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .card h2::before {
+            content: "";
+            width: 4px;
+            height: 1.2em;
+            background: var(--primary);
+            border-radius: 2px;
+        }
+
+        .upload-zone {
+            border: 2px dashed var(--muted);
+            border-radius: 12px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--primary);
+            background: rgba(124, 58, 237, 0.1);
+        }
+        .upload-zone input { display: none; }
+        .upload-icon { font-size: 3rem; margin-bottom: 1rem; }
+        .upload-text { color: var(--muted); }
+
+        #preview {
+            max-width: 100%;
+            max-height: 400px;
+            border-radius: 8px;
+            display: none;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        .control-group {
+            flex: 1;
+            min-width: 150px;
+        }
+        .control-group label {
+            display: block;
+            font-size: 0.875rem;
+            color: var(--muted);
+            margin-bottom: 0.5rem;
+        }
+        input[type="range"] {
+            width: 100%;
+            accent-color: var(--primary);
+        }
+        .threshold-value {
+            font-weight: bold;
+            color: var(--primary);
+        }
+
+        .btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 500;
+            transition: background 0.3s;
+        }
+        .btn:hover { background: var(--primary-dark); }
+        .btn:disabled {
+            background: var(--muted);
+            cursor: not-allowed;
+        }
+        .btn-secondary {
+            background: var(--panel);
+            border: 1px solid var(--muted);
+        }
+
+        .results {
+            margin-top: 1rem;
+        }
+        .result-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+        }
+        .result-name { font-weight: 500; }
+        .result-score {
+            font-size: 0.875rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+        }
+        .result-score.high { background: var(--success); color: var(--bg); }
+        .result-score.medium { background: var(--warning); color: var(--bg); }
+        .result-score.low { background: var(--muted); color: white; }
+
+        .log {
+            background: #12121e;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: "Consolas", monospace;
+            font-size: 0.875rem;
+            max-height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .log-item { margin-bottom: 0.25rem; }
+        .log-item.info { color: var(--text); }
+        .log-item.success { color: var(--success); }
+        .log-item.warning { color: var(--warning); }
+        .log-item.error { color: var(--error); }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        .info-item {
+            text-align: center;
+            padding: 1rem;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+        }
+        .info-value { font-size: 1.5rem; font-weight: bold; color: var(--primary); }
+        .info-label { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--muted);
+            font-size: 0.875rem;
+        }
+        footer a { color: var(--primary); text-decoration: none; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>MoeFace Web</h1>
+        <span id="status" class="status-badge loading">加载模型中...</span>
+    </header>
+
+    <main>
+        <div class="card">
+            <h2>上传图片识别</h2>
+            
+            <div id="uploadZone" class="upload-zone">
+                <input type="file" id="fileInput" accept="image/*">
+                <div class="upload-icon">&#128247;</div>
+                <div class="upload-text">
+                    点击或拖拽图片到此处<br>
+                    <small>支持 JPG, PNG, WebP</small>
+                </div>
+                <img id="preview" alt="预览">
+            </div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label>识别阈值: <span id="thresholdValue" class="threshold-value">0.45</span></label>
+                    <input type="range" id="threshold" min="0.1" max="0.95" step="0.05" value="0.45">
+                </div>
+            </div>
+
+            <button id="recognizeBtn" class="btn" disabled>开始识别</button>
+        </div>
+
+        <div class="card">
+            <h2>识别结果</h2>
+            
+            <div id="results" class="results" style="display:none;">
+                <div class="info-grid">
+                    <div class="info-item">
+                        <div id="faceCount" class="info-value">0</div>
+                        <div class="info-label">检测到人脸</div>
+                    </div>
+                    <div class="info-item">
+                        <div id="matchCount" class="info-value">0</div>
+                        <div class="info-label">匹配成功</div>
+                    </div>
+                </div>
+                <div id="resultList"></div>
+            </div>
+
+            <div id="noResult" style="text-align:center; color: var(--muted); padding: 2rem;">
+                暂无识别结果<br>
+                <small>上传图片后点击识别</small>
+            </div>
+        </div>
+
+        <div class="card" style="grid-column: 1 / -1;">
+            <h2>运行日志</h2>
+            <div id="log" class="log"></div>
+        </div>
+    </main>
+
+    <footer>
+        <p>基于 face-api.js + TensorFlow.js | 特征库: <span id="dbCount">-</span> 个角色</p>
+    </footer>
+
+    <script>
+        // 状态
+        let modelsReady = false;
+        let database = null;
+        const THRESHOLD_DEFAULT = 0.45;
+
+        // DOM
+        const statusEl = document.getElementById('status');
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const preview = document.getElementById('preview');
+        const thresholdInput = document.getElementById('threshold');
+        const thresholdValue = document.getElementById('thresholdValue');
+        const recognizeBtn = document.getElementById('recognizeBtn');
+        const resultsEl = document.getElementById('results');
+        const noResultEl = document.getElementById('noResult');
+        const resultList = document.getElementById('resultList');
+        const logEl = document.getElementById('log');
+        const dbCountEl = document.getElementById('dbCount');
+        const faceCountEl = document.getElementById('faceCount');
+        const matchCountEl = document.getElementById('matchCount');
+
+        // 日志
+        function log(msg, type = 'info') {
+            const item = document.createElement('div');
+            item.className = `log-item ${type}`;
+            item.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logEl.appendChild(item);
+            logEl.scrollTop = logEl.scrollHeight;
+            console.log(`[${type}]`, msg);
+        }
+
+        // 状态更新
+        function setStatus(text, state) {
+            statusEl.textContent = text;
+            statusEl.className = `status-badge ${state}`;
+        }
+
+        // 加载特征库
+        async function loadDatabase() {
+            try {
+                log('正在加载特征库...');
+                const response = await fetch('features/全部特征库.json');
+                if (!response.ok) throw new Error('特征库加载失败');
+                database = await response.json();
+                const count = Object.keys(database).length;
+                dbCountEl.textContent = count;
+                log(`特征库加载完成: ${count} 个角色`, 'success');
+                return true;
+            } catch (e) {
+                log(`特征库加载失败: ${e.message}`, 'error');
+                return false;
+            }
+        }
+
+        // 加载模型
+        async function loadModels() {
+            try {
+                log('正在加载 face-api.js 模型...');
+                // 使用 @vladmandic/face-api 的CDN（兼容性更好）
+                const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
+                
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+                    faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL)
+                ]);
+                
+                modelsReady = true;
+                setStatus('模型加载完成', 'ready');
+                recognizeBtn.disabled = false;
+                log('face-api.js 模型加载完成', 'success');
+                return true;
+            } catch (e) {
+                log(`模型加载失败: ${e.message}`, 'error');
+                setStatus('模型加载失败', 'error');
+                return false;
+            }
+        }
+
+        // 余弦相似度
+        function cosineSimilarity(a, b) {
+            let dot = 0, normA = 0, normB = 0;
+            for (let i = 0; i < a.length; i++) {
+                dot += a[i] * b[i];
+                normA += a[i] * a[i];
+                normB += b[i] * b[i];
+            }
+            return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-6);
+        }
+
+        // 识别
+        async function recognize() {
+            if (!modelsReady || !database) {
+                log('模型或特征库未就绪', 'error');
+                return;
+            }
+
+            if (!preview.src || preview.style.display === 'none') {
+                log('请先上传图片', 'warning');
+                return;
+            }
+
+            const threshold = parseFloat(thresholdInput.value);
+            log(`开始识别 (阈值: ${threshold})...`);
+
+            try {
+                // 使用预览图片元素进行检测
+                const detection = await faceapi
+                    .detectSingleFace(preview, new faceapi.TinyFaceDetectorOptions())
+                    .withFaceLandmarks(true)
+                    .withFaceDescriptor();
+
+                if (!detection) {
+                    log('未检测到人脸', 'warning');
+                    return;
+                }
+
+                const descriptor = Array.from(detection.descriptor);
+                log(`检测到1张人脸，特征维度: ${descriptor.length}`);
+                
+                // 与特征库比对
+                const matches = [];
+                for (const [name, refDescriptor] of Object.entries(database)) {
+                    // 确保维度匹配
+                    if (!Array.isArray(refDescriptor) || refDescriptor.length !== descriptor.length) {
+                        continue;
+                    }
+                    const similarity = cosineSimilarity(descriptor, refDescriptor);
+                    if (similarity >= threshold) {
+                        matches.push({ name, similarity });
+                    }
+                }
+
+                // 按相似度排序
+                matches.sort((a, b) => b.similarity - a.similarity);
+
+                // 更新UI
+                faceCountEl.textContent = 1;
+                matchCountEl.textContent = matches.length;
+                resultsEl.style.display = 'block';
+                noResultEl.style.display = 'none';
+
+                resultList.innerHTML = '';
+                if (matches.length === 0) {
+                    resultList.innerHTML = '<div style="color:var(--muted)">未匹配到已知角色</div>';
+                    log('未匹配到已知角色', 'warning');
+                } else {
+                    matches.forEach((m, i) => {
+                        const scoreClass = m.similarity >= 0.6 ? 'high' : m.similarity >= 0.5 ? 'medium' : 'low';
+                        const item = document.createElement('div');
+                        item.className = 'result-item';
+                        item.innerHTML = `
+                            <span class="result-name">${i + 1}. ${m.name}</span>
+                            <span class="result-score ${scoreClass}">${(m.similarity * 100).toFixed(1)}%</span>
+                        `;
+                        resultList.appendChild(item);
+                        log(`匹配: ${m.name} (${(m.similarity * 100).toFixed(1)}%)`, 'success');
+                    });
+                }
+            } catch (e) {
+                log(`识别出错: ${e.message}`, 'error');
+                console.error(e);
+            }
+        }
+
+        // 上传处理
+        function handleFile(file) {
+            if (!file || !file.type.startsWith('image/')) {
+                log('请上传图片文件', 'warning');
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                preview.src = e.target.result;
+                preview.style.display = 'block';
+                uploadZone.querySelector('.upload-icon').style.display = 'none';
+                uploadZone.querySelector('.upload-text').style.display = 'none';
+                log(`已加载图片: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // 事件绑定
+        uploadZone.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files[0]) handleFile(e.target.files[0]);
+        });
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+        });
+
+        thresholdInput.addEventListener('input', () => {
+            thresholdValue.textContent = parseFloat(thresholdInput.value).toFixed(2);
+        });
+
+        recognizeBtn.addEventListener('click', recognize);
+
+        // 初始化
+        async function init() {
+            log('MoeFace Web 初始化中...');
+            await loadDatabase();
+            await loadModels();
+        }
+
+        init();
+    </script>
+</body>
+</html>
