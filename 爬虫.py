@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 # ======================== 配置区域 ========================
 DOWNLOAD_THREADS = 5
 REQUEST_DELAY = 0.5
-REQUEST_TIMEOUT = (5, 10)          # (连接超时, 读取超时) 单位秒
+REQUEST_TIMEOUT = (5, 4000)          # (连接超时, 读取超时) 单位秒
 
 ENABLE_BING = True
 ENABLE_GOOGLE = True
@@ -41,7 +41,7 @@ ROLE_SUFFIXES = {
     "Ayachi_Nene": ["立绘","壁纸","綾地寧々","Nene Ayachi","桌角战士"]
 }
 
-# ======================== 日志函数（必须定义在使用之前） ========================
+# ======================== 日志函数 ========================
 def log(msg):
     """带时间戳的日志"""
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
@@ -87,7 +87,7 @@ def contains_negative_word(text):
 # 程序启动时加载负面词
 load_negative_words()
 
-# ======================== 图源函数（增加超时和日志） ========================
+# ======================== 图源函数 ========================
 def get_bing_images(keyword, num):
     log(f"Bing 开始搜索: {keyword}")
     urls = []
@@ -232,7 +232,8 @@ def get_safebooru_images(keyword, num):
     page = 0
     max_pages = 3
     while len(urls) < num and page < max_pages:
-        api_url = f"https://safebooru.org/index.php?page=dapi&s=post&q=index&tags={urllib.parse.quote(keyword)}&pid={page}&limit=40"
+        #https://safebooru.org/index.php?page=post&s=list&tags=ace+taffy
+        api_url = f"https://safebooru.org/index.php?page={page}&s=list&tags={urllib.parse.quote(keyword)}"
         try:
             log(f"  Safebooru请求第{page+1}页")
             resp = requests.get(api_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
@@ -336,23 +337,42 @@ def download_image(url, dir_path, base_name):
     except Exception:
         return False
 
+# ======================== 修改后的 get_roles_from_dir 函数 ========================
 def get_roles_from_dir(root_dir):
+    """
+    从目录获取角色列表
+    支持空目录：如果目录为空或没有图片，自动将根目录名作为角色名创建文件夹
+    """
     if not os.path.isdir(root_dir):
         return []
+    
     items = os.listdir(root_dir)
     subdirs = [item for item in items if os.path.isdir(os.path.join(root_dir, item))]
+    
+    # 情况1：有子文件夹，每个子文件夹作为一个角色
     if subdirs:
         roles = []
         for sub in subdirs:
             role_path = os.path.join(root_dir, sub)
             roles.append((sub, role_path))
         return roles
+    
+    # 情况2：当前目录有图片文件
     image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
     has_images = any(f.lower().endswith(image_extensions) for f in items if os.path.isfile(os.path.join(root_dir, f)))
     if has_images:
         role_name = os.path.basename(root_dir)
         return [(role_name, root_dir)]
-    return []
+    
+    # 情况3：目录为空或没有图片 - 自动将根目录名作为角色名创建文件夹
+    role_name = os.path.basename(root_dir)
+    # 如果根目录名无效或为空，使用默认名称
+    if not role_name or role_name == '':
+        role_name = "默认角色"
+    role_path = os.path.join(root_dir, role_name)
+    os.makedirs(role_path, exist_ok=True)
+    print(f"目录为空，自动创建角色文件夹: {role_path}")
+    return [(role_name, role_path)]
 
 def crawl_all_roles(root_dir, max_images_per_role):
     if not os.path.exists(root_dir):
@@ -364,7 +384,7 @@ def crawl_all_roles(root_dir, max_images_per_role):
     
     roles = get_roles_from_dir(root_dir)
     if not roles:
-        print(f"警告：在 {root_dir} 下没有找到角色文件夹或图片")
+        print(f"警告：在 {root_dir} 下没有找到角色文件夹或图片，且无法自动创建角色")
         return
     
     print(f"共找到 {len(roles)} 个角色：{', '.join([name for name, _ in roles])}")
@@ -409,7 +429,7 @@ def crawl_all_roles(root_dir, max_images_per_role):
         print(f"角色 {role_name} 完成，成功 {success} 张")
     print("\n所有角色处理完毕！")
 
-# ======================== GUI 界面（与原版相同） ========================
+# ======================== GUI 界面 ========================
 class StdoutRedirector:
     def __init__(self, text_widget):
         self.text_widget = text_widget
@@ -456,6 +476,7 @@ class CrawlerGUI:
         self.log_text.insert(tk.END, "支持两种结构：\n")
         self.log_text.insert(tk.END, "  1. 根目录下直接包含多个角色文件夹（每个文件夹一个角色）\n")
         self.log_text.insert(tk.END, "  2. 根目录本身就是某个角色的目录（目录内已有图片）\n")
+        self.log_text.insert(tk.END, "  3. 根目录为空 - 自动创建以根目录名命名的角色文件夹并开始爬取\n")
         self.log_text.insert(tk.END, "然后点击「开始爬取」\n")
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
