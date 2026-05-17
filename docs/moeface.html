@@ -460,7 +460,7 @@
 
             <div class="upload-zone" id="uploadZone">
                 <input type="file" id="fileInput" accept="image/*">
-                <div class="upload-icon"></div>
+                <div class="upload-icon">📂</div>
                 <div class="upload-text">点击或拖拽上传动漫图片</div>
                 <div class="upload-hint">支持 JPG / PNG / WebP</div>
             </div>
@@ -524,6 +524,7 @@
         let database = null;
         let currentImage = null;
         let detections = [];
+        let activeAnimation = null; // 记录当前粒子动画，用于取消
 
         // DOM 元素
         const els = {
@@ -747,6 +748,10 @@
         }
 
         function clearAll() {
+            if (activeAnimation) {
+                cancelAnimationFrame(activeAnimation);
+                activeAnimation = null;
+            }
             currentImage = null;
             detections = [];
             els.previewContainer.classList.remove('show');
@@ -761,6 +766,107 @@
             log('已清空，可上传新图片', 'info');
         }
 
+        // ========== 粒子汇聚动画 ==========
+        function startParticleConvergence(detectionBoxesOnCanvas, canvasCtx, canvasWidth, canvasHeight, duration = 800, callback) {
+            // 取消之前的动画
+            if (activeAnimation) {
+                cancelAnimationFrame(activeAnimation);
+                activeAnimation = null;
+            }
+            // 粒子数量: 每个人脸框约200个粒子
+            const PARTICLES_PER_FACE = 220;
+            let particles = [];
+            const startTime = performance.now();
+            
+            // 为每个检测框生成目标边界点集合（矩形四条边上均匀取点）
+            for (const box of detectionBoxesOnCanvas) {
+                const { x, y, w, h } = box;
+                // 边界点生成: 每条边生成若干目标点 (总共大约PARTICLES_PER_FACE)
+                const pointsPerEdge = Math.floor(PARTICLES_PER_FACE / 4);
+                const targets = [];
+                // 上边 (x, y) -> (x+w, y)
+                for (let i = 0; i <= pointsPerEdge; i++) {
+                    const tx = x + (w * i / pointsPerEdge);
+                    targets.push({ x: tx, y: y });
+                }
+                // 下边
+                for (let i = 0; i <= pointsPerEdge; i++) {
+                    const tx = x + (w * i / pointsPerEdge);
+                    targets.push({ x: tx, y: y + h });
+                }
+                // 左边
+                for (let i = 1; i < pointsPerEdge; i++) {
+                    const ty = y + (h * i / pointsPerEdge);
+                    targets.push({ x: x, y: ty });
+                }
+                // 右边
+                for (let i = 1; i < pointsPerEdge; i++) {
+                    const ty = y + (h * i / pointsPerEdge);
+                    targets.push({ x: x + w, y: ty });
+                }
+                // 为每个目标创建一个粒子，起始位置随机分布在画布内
+                for (let t of targets) {
+                    particles.push({
+                        x: Math.random() * canvasWidth,
+                        y: Math.random() * canvasHeight,
+                        targetX: t.x,
+                        targetY: t.y,
+                        progress: 0  // 0->1 插值进度
+                    });
+                }
+            }
+            
+            if (particles.length === 0) {
+                if (callback) callback();
+                return;
+            }
+            
+            function animate(now) {
+                const elapsed = now - startTime;
+                let t = Math.min(1, elapsed / duration);
+                // 使用缓动曲线 easeOutCubic
+                const ease = 1 - Math.pow(1 - t, 3);
+                
+                canvasCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+                // 绘制粒子 (绿色圆点)
+                for (let p of particles) {
+                    const curX = p.x + (p.targetX - p.x) * ease;
+                    const curY = p.y + (p.targetY - p.y) * ease;
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(curX, curY, 3, 0, Math.PI * 2);
+                    canvasCtx.fillStyle = `rgba(80, 220, 100, ${1 - t * 0.5})`;
+                    canvasCtx.fill();
+                    // 外发光感
+                    canvasCtx.shadowBlur = 0;
+                }
+                
+                if (t < 1) {
+                    activeAnimation = requestAnimationFrame(animate);
+                } else {
+                    // 动画结束，清除粒子，绘制最终绿框
+                    canvasCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+                    // 绘制绿色边框 (最终轮廓)
+                    for (let box of detectionBoxesOnCanvas) {
+                        canvasCtx.strokeStyle = '#22c55e';
+                        canvasCtx.lineWidth = 4;
+                        canvasCtx.shadowBlur = 0;
+                        canvasCtx.strokeRect(box.x, box.y, box.w, box.h);
+                        // 加一个光晕
+                        canvasCtx.beginPath();
+                        canvasCtx.strokeStyle = '#a3e635';
+                        canvasCtx.lineWidth = 2;
+                        canvasCtx.strokeRect(box.x-1, box.y-1, box.w+2, box.h+2);
+                    }
+                    activeAnimation = null;
+                    if (callback) callback();
+                }
+            }
+            
+            // 先清空画布并启动
+            canvasCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+            activeAnimation = requestAnimationFrame(animate);
+        }
+
         // 检测人脸（正确链式调用）
         async function detectFaces() {
             const img = els.previewImage;
@@ -768,7 +874,6 @@
             const optionsMid = new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.1 });
             
             try {
-                // 先尝试低阈值检测
                 let results = await faceapi.detectAllFaces(img, optionsLow)
                     .withFaceLandmarks(true)
                     .withFaceDescriptors();
@@ -781,13 +886,11 @@
                 }
                 
                 if (results.length === 0 && img.naturalWidth > 200) {
-                    // 极低阈值兜底
                     const optionsUltra = new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.05 });
                     results = await faceapi.detectAllFaces(img, optionsUltra)
                         .withFaceLandmarks(true)
                         .withFaceDescriptors();
                 }
-                
                 return results;
             } catch (err) {
                 log(`检测出错: ${err.message}`, 'error');
@@ -811,17 +914,47 @@
             
             try {
                 syncCanvasSize();
-                detections = await detectFaces();
+                const rawDetections = await detectFaces();
                 
-                if (detections.length === 0) {
+                if (rawDetections.length === 0) {
                     log('未检测到明确人脸框，启动全图特征匹配模式...', 'warning');
                     await fullImageMode(threshold);
                     return;
                 }
                 
-                log(`检测到 ${detections.length} 个人脸区域`, 'success');
-                drawDetections();
+                log(`检测到 ${rawDetections.length} 个人脸区域`, 'success');
+                detections = rawDetections;
                 
+                // 将原始检测框坐标转换为canvas上的坐标
+                const img = els.previewImage;
+                const imgRect = img.getBoundingClientRect();
+                const scaleX = imgRect.width / img.naturalWidth;
+                const scaleY = imgRect.height / img.naturalHeight;
+                const boxesOnCanvas = detections.map(det => {
+                    const box = det.detection.box;
+                    return {
+                        x: box.x * scaleX,
+                        y: box.y * scaleY,
+                        w: box.width * scaleX,
+                        h: box.height * scaleY
+                    };
+                });
+                
+                // 粒子汇聚动画 + 最后绘制绿框
+                const canvas = els.canvasOverlay;
+                const ctx = canvas.getContext('2d');
+                const width = canvas.width;
+                const height = canvas.height;
+                
+                // 执行粒子动画，动画结束后自动绘制绿框，然后继续识别匹配
+                await new Promise((resolve) => {
+                    startParticleConvergence(boxesOnCanvas, ctx, width, height, 800, () => {
+                        // 动画完成，绿框已经绘制在canvas上，但为了和原drawDetections风格一致，已经绘制好了，不需要额外调用drawDetections
+                        resolve();
+                    });
+                });
+                
+                // 进行特征匹配 (原有逻辑)
                 const allMatches = [];
                 for (let i = 0; i < detections.length; i++) {
                     const desc128 = Array.from(detections[i].descriptor);
@@ -840,7 +973,6 @@
                 
                 if (allMatches.length === 0) {
                     log('人脸区域未匹配到特征库（所有匹配分数均低于阈值），可尝试降低阈值', 'warning');
-                    // 仍然展示最高分（如果有）供参考
                     let bestSim = 0;
                     let bestName = '';
                     for (let i = 0; i < detections.length; i++) {
@@ -876,7 +1008,6 @@
             log('全图特征比对模式 (针对整体动漫风格)', 'info');
             try {
                 const img = els.previewImage;
-                // 使用多个检测器尝试获取人脸特征，确保链式调用正确
                 let dets = [];
                 const optionsList = [
                     { inputSize: 512, scoreThreshold: 0.12 },
@@ -887,7 +1018,6 @@
                 for (const opt of optionsList) {
                     try {
                         const opts = new faceapi.TinyFaceDetectorOptions(opt);
-                        // 正确链式调用：detectAllFaces -> withFaceLandmarks -> withFaceDescriptors
                         const results = await faceapi.detectAllFaces(img, opts)
                             .withFaceLandmarks(true)
                             .withFaceDescriptors();
@@ -907,7 +1037,6 @@
                     return;
                 }
                 
-                // 取面积最大的脸作为主要特征
                 let maxFace = dets[0];
                 let maxArea = 0;
                 for (const d of dets) {
@@ -933,7 +1062,6 @@
                     log(`全图匹配到 ${matches.length} 个候选`, 'success');
                     displayResults(matches, dets.length);
                 } else {
-                    // 显示最高分供参考
                     let bestSim = 0;
                     let bestName = '';
                     for (const [charName, refVec] of Object.entries(database)) {
@@ -958,31 +1086,6 @@
                 els.noResult.style.display = 'block';
                 els.faceCount.textContent = '?';
             }
-        }
-        
-        function drawDetections() {
-            const canvas = els.canvasOverlay;
-            const ctx = canvas.getContext('2d');
-            const img = els.previewImage;
-            const imgRect = img.getBoundingClientRect();
-            canvas.width = imgRect.width;
-            canvas.height = imgRect.height;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            const scaleX = imgRect.width / img.naturalWidth;
-            const scaleY = imgRect.height / img.naturalHeight;
-            ctx.strokeStyle = '#22c55e';
-            ctx.lineWidth = 3;
-            detections.forEach((det, idx) => {
-                const box = det.detection.box;
-                const x = box.x * scaleX;
-                const y = box.y * scaleY;
-                const w = box.width * scaleX;
-                const h = box.height * scaleY;
-                ctx.strokeRect(x, y, w, h);
-                ctx.fillStyle = '#22c55e';
-                ctx.font = 'bold 16px sans-serif';
-                ctx.fillText(`👤${idx+1}`, x, y-5);
-            });
         }
         
         function displayResults(matches, faceCountVal) {
