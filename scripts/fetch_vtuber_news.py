@@ -78,6 +78,24 @@ SMTP_PASS = os.getenv('SMTP_PASS', '')
 TO_EMAIL_RAW = os.getenv('TO_EMAIL', '')
 RECIPIENTS = [email.strip() for email in TO_EMAIL_RAW.split(',') if email.strip()] if TO_EMAIL_RAW else []
 
+# 加载 Issue #1 订阅者列表
+SUBSCRIBERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'subscribers.txt')
+if os.path.exists(SUBSCRIBERS_FILE):
+    try:
+        with open(SUBSCRIBERS_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                email = line.strip()
+                if email and '@' in email and not email.startswith('#'):
+                    if email not in RECIPIENTS:
+                        RECIPIENTS.append(email)
+        if RECIPIENTS:
+            print(f"[配置] ✅ 已加载订阅者列表: 共 {len(RECIPIENTS)} 个收件人")
+    except Exception as e:
+        print(f"[警告] 读取 subscribers.txt 失败: {e}")
+elif RECIPIENTS:
+    print(f"[配置] 收件人数: {len(RECIPIENTS)} (仅环境变量 TO_EMAIL)")
+
+
 BILI_COOKIE = os.getenv('BILI_COOKIE', '')
 
 HEADERS = {
@@ -307,32 +325,78 @@ def parse_nijisanji_news(html: str) -> List[Dict]:
 
 # ==================== 微博抓取 ====================
 
+# 微博反爬状态码说明（SHANHAI-SERVER）
+WEIBO_BLOCK_CODES = {
+    418: "被识别为自动化请求（反爬拦截）",
+    432: "山海关防火墙拦截（需要有效登录Cookie）",
+    403: "IP被临时封禁或访问频率过高",
+    302: "被重定向到登录页（Cookie失效）",
+}
+
+
 def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> List[Dict]:
     weibo_news = []
     print(f"  [微博] 抓取: {name} (UID: {uid})")
-    
+    print(f"  [微博] Cookie状态: {'已配置' if WEIBO_CONFIG['headers'].get('Cookie') else '未配置(无Cookie)'}")
+
     try:
         containerid = f"107603{uid}"
         url = f"https://m.weibo.cn/api/container/getIndex?type=uid&value={uid}&containerid={containerid}"
         headers = WEIBO_CONFIG['headers'].copy()
-        
+
         resp = requests.get(url, headers=headers, timeout=15)
-        
+
+        # ====== 阶段1：HTTP 状态码检查（增强版）======
         if resp.status_code != 200:
-            print(f"  [错误] HTTP {resp.status_code}")
+            block_reason = WEIBO_BLOCK_CODES.get(resp.status_code, f'HTTP错误')
+            print(f"  [微博] ❌ {block_reason} (HTTP {resp.status_code})")
+            # 针对已知反爬码给出具体修复建议
+            if resp.status_code in (418, 432):
+                print(f"  [微博] 💡 修复建议：更新 GitHub Secrets 中的 WEIBO_COOKIE（当前Cookie可能已过期/无效）")
+                print(f"  [微博]    获取方式：浏览器登录 m.weibo.cn → F12 → 复制完整 Cookie 值")
+            elif resp.status_code == 403:
+                print(f"  [微博] 💡 建议：检查 IP 是否被限制，或等待几分钟后重试")
+            elif resp.status_code == 302:
+                print(f"  [微博] 💡 Cookie 已失效，需要重新获取并更新 WEIBO_COOKIE")
             return []
-            
-        data = resp.json()
-        
-        if data.get('ok') != 1:
-            print(f"  [警告] API 返回异常: {data.get('msg', '未知错误')}")
+
+        # ====== 阶段2：JSON 解析安全处理 ======
+        if not resp.text.strip():
+            print(f"  [微博] ❌ 响应体为空（服务器返回了空内容）")
             return []
-            
+
+        try:
+            data = resp.json()
+        except Exception as json_err:
+            print(f"  [微博] ❌ JSON解析失败: {json_err}")
+            print(f"  [微博]    响应内容前100字符: {repr(resp.text[:100])}")
+            return []
+
+        # ====== 阶段3：业务状态码 + 详细诊断 ======
+        ok_val = data.get('ok')
+        msg_val = data.get('msg', '')
+
+        if ok_val != 1:
+            # 打印完整的响应结构用于调试
+            print(f"  [微博] ❌ API 业务异常: ok={ok_val}, msg={repr(msg_val)}")
+            # 打印顶层 key 帮助分析异常结构
+            top_keys = list(data.keys())[:10]
+            print(f"  [微博]    响应结构 keys: {top_keys}")
+            # 尝试提取更多有用信息
+            if isinstance(data.get('data'), dict):
+                data_keys = list(data['data'].keys())[:8]
+                print(f"  [微博]    data.keys: {data_keys}")
+            print(f"  [微博] 💡 可能原因：Cookie权限不足 / 账号异常 / 接口变更")
+            return []
+
         cards = data.get('data', {}).get('cards', [])
         if not cards:
-            print(f"  [微博] {name} 无卡片数据")
+            print(f"  [微博] ⚠️ {name} API 返回正常但无卡片数据（账号可能设置了隐私/无微博）")
             return []
-        
+
+        total_cards = len(cards)
+        filtered_by_date = 0
+        filtered_by_empty_text = 0
         processed = 0
         for card in cards:
             if processed >= limit:
@@ -340,7 +404,7 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
             mblog = card.get('mblog') or card.get('status')
             if not mblog:
                 continue
-                
+
             try:
                 raw_text = mblog.get('text', '')
                 title = re.sub('<[^<]+?>', '', raw_text).strip()
@@ -348,8 +412,9 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                     if mblog.get('retweeted_status'):
                         title = "转发微博"
                     else:
+                        filtered_by_empty_text += 1
                         continue
-                
+
                 if mblog.get('retweeted_status'):
                     retweet = mblog['retweeted_status']
                     retweet_text = re.sub('<[^<]+?>', '', retweet.get('text', ''))
@@ -357,21 +422,22 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                         title = f"[转发] {retweet_text}"
                     else:
                         title = f"{title} // {retweet_text}"
-                
+
                 if len(title) > 200:
                     title = title[:197] + "..."
-                    
+
                 post_id = mblog.get('id', '')
                 link = f"https://m.weibo.cn/detail/{post_id}" if post_id else f"https://m.weibo.cn/u/{uid}"
-                
+
                 created_at = mblog.get('created_at', '')
                 if created_at:
                     pub_date = parse_weibo_datetime(created_at)
                     if not is_recent(pub_date):
+                        filtered_by_date += 1
                         continue
                 else:
                     pub_date = datetime.now().strftime('%Y-%m-%d %H:%M')
-                
+
                 weibo_news.append({
                     'title': title,
                     'link': link,
@@ -379,11 +445,11 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                     'source': f'微博: {name}'
                 })
                 processed += 1
-                    
+
             except Exception as post_error:
                 print(f"    [警告] 处理单条微博失败: {post_error}")
                 continue
-        
+
         unique = []
         seen = set()
         for item in weibo_news:
@@ -391,10 +457,13 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
             if key not in seen:
                 seen.add(key)
                 unique.append(item)
-                
-        print(f"  [OK] {name}: {len(unique)} 条最近动态")
+
+        # 详细日志：帮助定位"获取成功但不显示"的问题
+        print(f"  [微博] {name}: 总卡片 {total_cards}, 日期过滤 {filtered_by_date}, 空文本过滤 {filtered_by_empty_text}, 最终 {len(unique)} 条")
+        if filtered_by_date > 0:
+            print(f"  [微博] ⚠️ {name} 有 {filtered_by_date} 条因超过3天被过滤（如需显示更多可调整 DATE_RANGE_DAYS）")
         return unique
-            
+
     except Exception as e:
         print(f"  [错误] {name} 抓取失败: {e}")
         traceback.print_exc()
@@ -403,14 +472,23 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
 def fetch_weibo_news() -> List[Dict]:
     all_weibo_news = []
     if not WEIBO_CONFIG['enabled'] or not WEIBO_CONFIG['monitor_uids']:
+        print("[微博] 功能已禁用或未配置监控UID")
         return []
-    print(f"[INFO] 开始抓取 {len(WEIBO_CONFIG['monitor_uids'])} 个微博用户")
+    print(f"[INFO] 开始抓取 {len(WEIBO_CONFIG['monitor_uids'])} 个微博用户 (Cookie: {'已配置' if WEIBO_CONFIG['headers'].get('Cookie') else '❌未配置'})")
     for idx, uid in enumerate(WEIBO_CONFIG['monitor_uids']):
         name = WEIBO_CONFIG['monitor_names'][idx] if idx < len(WEIBO_CONFIG['monitor_names']) else f'用户{uid}'
         posts = fetch_weibo_posts(uid, 15, name)
         all_weibo_news.extend(posts)
         time.sleep(2)
-    print(f"  [OK] 微博: 共 {len(all_weibo_news)} 条")
+
+    # 汇总诊断
+    if len(all_weibo_news) == 0:
+        print(f"  [微博] ⚠️ 所有用户均未获取到数据！请检查：")
+        print(f"    1. GitHub Secrets > WEIBO_COOKIE 是否已设置且未过期")
+        print(f"    2. Cookie 获取方式：浏览器打开 m.weibo.cn 并登录 → F12 → Network → 刷新 → 任选请求 → 复制完整Cookie")
+        print(f"    3. 确认监控的UID ({', '.join(WEIBO_CONFIG['monitor_uids'])}) 是否正确")
+    else:
+        print(f"  [OK] ✅ 微博: 共 {len(all_weibo_news)} 条动态")
     return all_weibo_news
 
 # ==================== B站动态抓取 ====================
@@ -535,9 +613,10 @@ h2 {{ color: #4ecdc4; border-left: 4px solid #4ecdc4; padding-left: 12px; margin
 {audio_html}
 """
     for source, items in all_news.items():
-        if not items:
-            continue
         html += f'<h2>📌 {source}</h2>'
+        if not items:
+            html += '<p style="color:#888; font-size:13px; padding-left:12px;">近3天暂无新动态</p>'
+            continue
         for news in items[:50]:
             html += f'''<div class="news-item">
 <div class="news-title"><a href="{news.get('link', '#')}" target="_blank">{escape_html(news.get('title', ''))}</a></div>
@@ -605,13 +684,11 @@ def main():
 
     # B站动态
     bili = fetch_bilibili_news()
-    if bili:
-        all_news['国产 VTuber 动态'] = bili
+    all_news['国产 VTuber 动态'] = bili
 
-    # 微博动态
+    # 微博动态（始终添加分类，即使为空也在邮件中展示区块）
     weibo = fetch_weibo_news()
-    if weibo:
-        all_news['微博 VTuber 动态'] = weibo
+    all_news['微博 VTuber 动态'] = weibo
 
     total = sum(len(v) for v in all_news.values())
     print(f"\n总共抓取到 {total} 条近3天内新闻")
