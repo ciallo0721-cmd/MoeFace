@@ -26,6 +26,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install dependencies
+        run: pip install requests
+
       - name: Run subscriber handler
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
