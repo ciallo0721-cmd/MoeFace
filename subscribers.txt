@@ -2,5 +2,6 @@
 # 每行一个邮箱，由 issue_subscriber.yml 自动维护
 # 请勿手动编辑此文件，使用 Issue #1 进行订阅/退订
 #
-ciallo0721cmd@gmail.com
 3627742771@qq.com
+6767@gmail.com
+ciallo0721cmd@gmail.com
