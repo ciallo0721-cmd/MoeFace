@@ -2,7 +2,9 @@ name: VTuber News Fetcher
 
 on:
   schedule:
-    - cron: '0 0,4,12 * * *'   # 北京时间 8:00, 12:00, 20:00 (UTC 0,4,12)
+    # 北京时间 8:00 / 12:00 / 20:00 (UTC+8 → UTC 0:00 / 4:00 / 12:00)
+    # 注意：Actions 定时可能有 ±5~60min 延迟属正常现象
+    - cron: '0 0,4,12 * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
