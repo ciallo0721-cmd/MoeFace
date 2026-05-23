@@ -424,6 +424,219 @@ def draw_chinese_text(img, text, position, font_size=18, color=(0, 255, 0)):
         return img
 
 
+# ── 人体姿态检测（MediaPipe Pose）─────────────────────────────────────────
+_mp_pose_ready = False
+_mp_pose = None
+
+# 人体关键点索引（MediaPipe Pose 33个关键点中我们需要的）
+BODY_KEYPOINTS = {
+    "nose": 0,
+    "left_eye": 2,
+    "right_eye": 5,
+    "left_shoulder": 11,
+    "right_shoulder": 12,
+    "left_elbow": 13,
+    "right_elbow": 14,
+    "left_wrist": 15,
+    "right_wrist": 16,
+    "left_hip": 23,
+    "right_hip": 24,
+    "left_knee": 25,
+    "right_knee": 26,
+    "left_ankle": 27,
+    "right_ankle": 28,
+}
+
+# 骨骼连线：两两关键点索引之间的连接
+BODY_CONNECTIONS = [
+    # 头部 → 眼睛
+    (0, 2), (0, 5),
+    # 头部 → 肩膀
+    (0, 11), (0, 12),
+    # 双肩
+    (11, 12),
+    # 左臂：肩 → 肘 → 腕
+    (11, 13), (13, 15),
+    # 右臂：肩 → 肘 → 腕
+    (12, 14), (14, 16),
+    # 躯干：肩 → 髋
+    (11, 23), (12, 24),
+    # 髋部
+    (23, 24),
+    # 左腿：髋 → 膝 → 踝
+    (23, 25), (25, 27),
+    # 右腿：髋 → 膝 → 踝
+    (24, 26), (26, 28),
+]
+
+# 关键点中文名称（用于显示）
+BODY_KEYPOINT_LABELS = {
+    0: "鼻子",
+    2: "左眼",
+    5: "右眼",
+    11: "左肩",
+    12: "右肩",
+    13: "左肘",
+    14: "右肘",
+    15: "左腕",
+    16: "右腕",
+    23: "左髋",
+    24: "右髋",
+    25: "左膝",
+    26: "右膝",
+    27: "左踝",
+    28: "右踝",
+}
+
+def _ensure_mediapipe(log_fn=print):
+    """确保 MediaPipe PoseLandmarker 已加载（懒加载）"""
+    global _mp_pose_ready, _mp_pose
+    if _mp_pose_ready:
+        return True
+    try:
+        import mediapipe as mp
+        # 检查新 API（mediapipe 0.10+）
+        if hasattr(mp, 'tasks') and hasattr(mp.tasks, 'vision'):
+            _mp_pose = 'new_api'   # 新 API
+        else:
+            _mp_pose = 'old_api'   # 旧 API（mp.solutions）
+        _mp_pose_ready = True
+        log_fn("✅ MediaPipe Pose 已就绪喵~")
+        return True
+    except ImportError:
+        log_fn("❌ 未安装 mediapipe，请运行: pip install mediapipe")
+        return False
+
+
+def _get_pose_landmarker(log_fn=print, mode='image'):
+    """创建并返回 PoseLandmarker 实例（新 API）"""
+    import mediapipe as mp
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision
+
+    # 下载模型文件（如果不存在）
+    model_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'pose_landmarker.task'
+    )
+    if not os.path.exists(model_path):
+        log_fn("⬇️  首次运行，正在下载姿态检测模型（约 6MB）...")
+        import urllib.request
+        url = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task'
+        try:
+            urllib.request.urlretrieve(url, model_path)
+            log_fn(f"✅ 模型已保存: {model_path}")
+        except Exception as e:
+            log_fn(f"❌ 模型下载失败: {e}")
+            return None
+
+    base_opts = mp_python.BaseOptions(model_asset_path=model_path)
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_opts,
+        running_mode=(
+            vision.RunningMode.IMAGE
+            if mode == 'image'
+            else vision.RunningMode.VIDEO
+        ),
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        num_poses=1,
+    )
+    return vision.PoseLandmarker.create_from_options(options)
+
+
+def detect_body_pose(image_bgr, log_fn=print):
+    """检测单张图片中的人体姿态，返回检测结果（含 landmark 列表）"""
+    if not _ensure_mediapipe(log_fn):
+        return None
+    import cv2, numpy as np
+    from mediapipe.tasks.python import vision as mp_vision
+
+    h, w = image_bgr.shape[:2]
+    # 限制最大分辨率提高速度
+    max_dim = 1280
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        image_bgr = cv2.resize(image_bgr, (int(w * scale), int(h * scale)))
+        h, w = image_bgr.shape[:2]
+
+    marker = _get_pose_landmarker(log_fn, mode='image')
+    if marker is None:
+        return None
+
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    mp_image = mp_vision.Image.create_from_numpy_array(image_rgb)
+
+    try:
+        result = marker.detect(mp_image)
+        return result
+    finally:
+        marker.close()
+
+
+def draw_body_skeleton(image_bgr, pose_results,
+                       line_color=(0, 255, 0),
+                       point_color=(0, 255, 255),
+                       line_thickness=2,
+                       point_radius=5,
+                       show_labels=True):
+    """在图像上绘制身体骨骼连线 + 关键点圆圈 + 标签"""
+    import cv2
+    h, w = image_bgr.shape[:2]
+
+    # 新 API: pose_results.pose_landmarks 是 list[NormalizedLandmarks]
+    if (pose_results is None or
+            not hasattr(pose_results, 'pose_landmarks') or
+            not pose_results.pose_landmarks):
+        return image_bgr
+
+    # 只画第一个检测到的人
+    landmarks = pose_results.pose_landmarks[0]
+
+    # 1. 画连线（骨骼）
+    for (idx1, idx2) in BODY_CONNECTIONS:
+        if idx1 >= len(landmarks) or idx2 >= len(landmarks):
+            continue
+        lm1 = landmarks[idx1]
+        lm2 = landmarks[idx2]
+        # 新 API 用 visibility 或 presence（float 0~1）
+        v1 = getattr(lm1, 'visibility', 1.0) or 1.0
+        v2 = getattr(lm2, 'visibility', 1.0) or 1.0
+        if v1 > 0.5 and v2 > 0.5:
+            x1, y1 = int(lm1.x * w), int(lm1.y * h)
+            x2, y2 = int(lm2.x * w), int(lm2.y * h)
+            cv2.line(image_bgr, (x1, y1), (x2, y2),
+                    line_color, line_thickness)
+
+    # 2. 画关键点圆点
+    for idx, label in BODY_KEYPOINT_LABELS.items():
+        if idx >= len(landmarks):
+            continue
+        lm = landmarks[idx]
+        v = getattr(lm, 'visibility', 1.0) or 1.0
+        if v > 0.5:
+            x, y = int(lm.x * w), int(lm.y * h)
+            cv2.circle(image_bgr, (x, y), point_radius, point_color, -1)
+            cv2.circle(image_bgr, (x, y), point_radius + 1, line_color, 1)
+
+    # 3. 画中文标签
+    if show_labels:
+        for idx, label in BODY_KEYPOINT_LABELS.items():
+            if idx >= len(landmarks):
+                continue
+            lm = landmarks[idx]
+            v = getattr(lm, 'visibility', 1.0) or 1.0
+            if v > 0.5:
+                x, y = int(lm.x * w), int(lm.y * h)
+                image_bgr = draw_chinese_text(
+                    image_bgr, label, (x + 8, y - 8),
+                    font_size=12, color=(255, 255, 255)
+                )
+
+    return image_bgr
+
+
 # ── 视频/图片处理（运行于子线程）──────────────────────────────────────────────
 MOVIEPY_AVAILABLE = False
 
@@ -454,7 +667,7 @@ def _add_audio(src_video, out_video, tmp_video):
 
 
 def process_image_file(source: str, database: dict, threshold=0.45,
-                       min_neighbors=3,
+                       min_neighbors=3, body_mode=False,
                        log_fn=print, preview_fn=None, done_fn=None):
     import cv2
     import numpy as np
@@ -467,26 +680,36 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             if done_fn: done_fn()
             return
 
-        gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = _anime_cascade.detectMultiScale(
-            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-            minSize=(20, 20), maxSize=(800, 800)
-        )
-        log_fn(f"检测到 {len(faces)} 张人脸")
+        if body_mode:
+            # ── 人体姿态检测模式 ──
+            pose_results = detect_body_pose(img, log_fn)
+            if pose_results and pose_results.pose_landmarks:
+                log_fn("✅ 检测到人体姿态，正在绘制骨骼...")
+                img = draw_body_skeleton(img, pose_results)
+            else:
+                log_fn("⚠️ 未检测到人体姿态喵~")
+        else:
+            # ── 原有人脸识别模式 ──
+            gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = _anime_cascade.detectMultiScale(
+                gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                minSize=(20, 20), maxSize=(800, 800)
+            )
+            log_fn(f"检测到 {len(faces)} 张人脸")
 
-        for (x, y, w, h) in faces:
-            x1 = max(0, x); y1 = max(0, y)
-            x2 = min(img.shape[1], x + w)
-            y2 = min(img.shape[0], y + h)
-            face     = img[y1:y2, x1:x2]
-            if face.size == 0:
-                continue
-            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            name, score = recognize_face(face_rgb, database, threshold)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
-            img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
-            log_fn(f"  {'✅' if name else '❓'} {txt}")
+            for (x, y, w, h) in faces:
+                x1 = max(0, x); y1 = max(0, y)
+                x2 = min(img.shape[1], x + w)
+                y2 = min(img.shape[0], y + h)
+                face     = img[y1:y2, x1:x2]
+                if face.size == 0:
+                    continue
+                face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                name, score = recognize_face(face_rgb, database, threshold)
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
+                img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
+                log_fn(f"  {'✅' if name else '❓'} {txt}")
 
         if preview_fn:
             preview_fn(img)
@@ -498,6 +721,7 @@ def process_image_file(source: str, database: dict, threshold=0.45,
 
 def process_video_file(source: str, database: dict, output_path=None,
                        threshold=0.45, skip_frames=2, min_neighbors=3,
+                       body_mode=False,
                        log_fn=print, preview_fn=None,
                        stop_event: threading.Event = None, done_fn=None):
     import cv2
@@ -512,6 +736,8 @@ def process_video_file(source: str, database: dict, output_path=None,
     h     = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     log_fn(f"视频信息: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
+    if body_mode:
+        log_fn("🔍 人体姿态检测模式")
 
     out = tmp_out = None
     if output_path:
@@ -523,6 +749,13 @@ def process_video_file(source: str, database: dict, output_path=None,
 
     frame_idx  = 0
     found_names: set = set()
+
+    # 视频模式下 MediaPipe 使用连续帧模式（更快）
+    _pose_marker = None
+    if body_mode and _ensure_mediapipe(log_fn):
+        import mediapipe as mp
+        from mediapipe.tasks.python import vision as mp_vision
+        _pose_marker = _get_pose_landmarker(log_fn, mode='video')
 
     try:
         while True:
@@ -537,29 +770,45 @@ def process_video_file(source: str, database: dict, output_path=None,
                 pct = frame_idx / total * 100
                 log_fn(f"进度: {pct:.1f}%  ({frame_idx}/{total})")
 
-            if frame_idx % skip_frames == 0:
-                gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = _anime_cascade.detectMultiScale(
-                    gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                    minSize=(20, 20), maxSize=(800, 800)
-                )
-                for (x, y, fw, fh) in faces:
-                    x1 = max(0, x); y1 = max(0, y)
-                    x2 = min(frame.shape[1], x + fw)
-                    y2 = min(frame.shape[0], y + fh)
-                    face = frame[y1:y2, x1:x2]
-                    if face.size == 0:
-                        continue
-                    face_rgb       = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                    name, score    = recognize_face(face_rgb, database, threshold)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
-                    frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
-                    if name:
-                        found_names.add(name)
-
-                if preview_fn:
+            if body_mode and _pose_marker:
+                # ── 人体姿态检测（新 API）──
+                if frame_idx % skip_frames == 0:
+                    import cv2
+                    from mediapipe.tasks.python import vision as mp_vision
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp_vision.Image.create_from_numpy_array(frame_rgb)
+                    results = _pose_marker.detect_for_video(mp_image, frame_idx)
+                    if results.pose_landmarks:
+                        frame = draw_body_skeleton(
+                            frame, results, show_labels=False
+                        )
+                if preview_fn and frame_idx % skip_frames == 0:
                     preview_fn(frame.copy())
+            elif not body_mode:
+                # ── 人脸识别 ──
+                if frame_idx % skip_frames == 0:
+                    gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    faces = _anime_cascade.detectMultiScale(
+                        gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                        minSize=(20, 20), maxSize=(800, 800)
+                    )
+                    for (x, y, fw, fh) in faces:
+                        x1 = max(0, x); y1 = max(0, y)
+                        x2 = min(frame.shape[1], x + fw)
+                        y2 = min(frame.shape[0], y + fh)
+                        face = frame[y1:y2, x1:x2]
+                        if face.size == 0:
+                            continue
+                        face_rgb       = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                        name, score    = recognize_face(face_rgb, database, threshold)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
+                        frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
+                        if name:
+                            found_names.add(name)
+
+                    if preview_fn:
+                        preview_fn(frame.copy())
 
             if out:
                 out.write(frame)
@@ -569,9 +818,11 @@ def process_video_file(source: str, database: dict, output_path=None,
         cap.release()
         if out:
             out.release()
+        if _pose_marker:
+            _pose_marker.close()
 
     log_fn(f"✅ 处理完成: {frame_idx} 帧")
-    if found_names:
+    if found_names and not body_mode:
         log_fn(f"识别角色: {', '.join(sorted(found_names))}")
 
     if output_path and tmp_out and os.path.exists(tmp_out):
@@ -613,6 +864,7 @@ class MoeFaceApp:
         self._models_ready = False
 
         self._auto_shutdown_var = tk.BooleanVar(value=False)
+        self._body_mode_var = tk.BooleanVar(value=False)  # 人体姿态检测模式
 
         self._build_ui()
         self._load_models_async()
@@ -708,6 +960,14 @@ class MoeFaceApp:
             activebackground=PANEL, activeforeground=TEXT
         )
         self._auto_shutdown_cb.pack(anchor="w", padx=10, pady=2)
+
+        self._body_mode_cb = tk.Checkbutton(
+            parent, text="🧍 人体姿态检测模式（骨骼连线）",
+            variable=self._body_mode_var,
+            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
+            activebackground=PANEL, activeforeground="#7c3aed"
+        )
+        self._body_mode_cb.pack(anchor="w", padx=10, pady=2)
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
@@ -1042,6 +1302,7 @@ class MoeFaceApp:
                 return
 
             mn = self._min_neighbors_var.get()
+            body_mode = self._body_mode_var.get()
 
             if suffix in IMAGE_EXTS:
                 self._log(f"\n🖼  图片: {path}")
@@ -1050,6 +1311,7 @@ class MoeFaceApp:
                     database=db,
                     threshold=self._threshold_var.get(),
                     min_neighbors=mn,
+                    body_mode=body_mode,
                     log_fn=self._log,
                     preview_fn=self._show_frame_cv,
                     done_fn=lambda: self._set_busy(False),
@@ -1064,6 +1326,7 @@ class MoeFaceApp:
                     threshold=self._threshold_var.get(),
                     skip_frames=self._skip_var.get(),
                     min_neighbors=mn,
+                    body_mode=body_mode,
                     log_fn=self._log,
                     preview_fn=self._show_frame_cv,
                     stop_event=self._stop_evt,
@@ -1371,6 +1634,7 @@ class MoeFaceCLI:
         self._log(f"📸 文件: {CLIColors.LCYAN}{path}{CLIColors.RESET}")
         threshold    = self.args.get("threshold", 0.45)
         min_neighbors = self.args.get("min_neighbors", 3)
+        body_mode    = self.args.get("body", False)
 
         results = []
         import cv2, numpy as np
@@ -1382,51 +1646,69 @@ class MoeFaceCLI:
             self._log("无法读取图片喵~", "error")
             return
 
-        gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = _anime_cascade.detectMultiScale(
-            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-            minSize=(20, 20), maxSize=(800, 800)
-        )
-        self._log(f"检测到 {CLIColors.SUCCESS}{len(faces)}{CLIColors.RESET} 张人脸")
+        if body_mode:
+            # ── 人体姿态检测 ──
+            self._log("🔍 人体姿态检测模式")
+            pose_results = detect_body_pose(img, self._log)
+            if pose_results and pose_results.pose_landmarks:
+                self._log("✅ 检测到人体姿态，绘制骨骼...")
+                img = draw_body_skeleton(img, pose_results)
+            else:
+                self._log("⚠️ 未检测到人体姿态喵~", "warn")
+        else:
+            # ── 人脸识别 ──
+            gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = _anime_cascade.detectMultiScale(
+                gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                minSize=(20, 20), maxSize=(800, 800)
+            )
+            self._log(f"检测到 {CLIColors.SUCCESS}{len(faces)}{CLIColors.RESET} 张人脸")
 
-        for (x, y, w, h) in faces:
-            x1, y1 = max(0, x), max(0, y)
-            x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
-            face = img[y1:y2, x1:x2]
-            if face.size == 0:
-                continue
-            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            name, score = recognize_face(face_rgb, self.db, threshold)
-            tag = CLIColors.SUCCESS if name else CLIColors.MUTED
-            self._log(f"  {tag}{name or '未知'}{CLIColors.RESET} "
-                      f"{CLIColors.MUTED}({score:.2f}){CLIColors.RESET} "
-                      f"@ ({x1},{y1},{w}×{h})", "ok" if name else "skip")
-            results.append((name, score))
-            if name:
-                self.stats["found_names"][name] = \
-                    self.stats["found_names"].get(name, 0) + 1
-
-        output = self.args.get("output")
-        if output and results:
-            draw = img.copy()
-            for (x, y, w, h), (name, score) in zip(faces, results):
+            for (x, y, w, h) in faces:
                 x1, y1 = max(0, x), max(0, y)
                 x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
-                cv2.rectangle(draw, (x1,y1),(x2,y2),(0,255,0),2)
-                color = (0,255,0) if name else (128,128,128)
-                draw = draw_chinese_text(draw,
-                    f"{name or '未知'} ({score:.2f})",
-                    (x1, max(0,y1-25)), 18, color)
-            cv2.imwrite(output, draw)
-            self._log(f"已保存标注图: {output}", "ok")
-        elif not results:
-            self._log("未检测到任何人脸", "warn")
+                face = img[y1:y2, x1:x2]
+                if face.size == 0:
+                    continue
+                face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                name, score = recognize_face(face_rgb, self.db, threshold)
+                tag = CLIColors.SUCCESS if name else CLIColors.MUTED
+                self._log(f"  {tag}{name or '未知'}{CLIColors.RESET} "
+                          f"{CLIColors.MUTED}({score:.2f}){CLIColors.RESET} "
+                          f"@ ({x1},{y1},{w}×{h})", "ok" if name else "skip")
+                results.append((name, score))
+                if name:
+                    self.stats["found_names"][name] = \
+                        self.stats["found_names"].get(name, 0) + 1
+
+        output = self.args.get("output")
+        if output:
+            if body_mode:
+                # 身体姿态模式：直接保存绘制后的图片
+                cv2.imwrite(output, img)
+                self._log(f"已保存姿态检测图: {output}", "ok")
+            elif results:
+                # 人脸识别模式：绘制标注后保存
+                draw = img.copy()
+                for (x, y, w, h), (name, score) in zip(faces, results):
+                    x1, y1 = max(0, x), max(0, y)
+                    x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
+                    cv2.rectangle(draw, (x1,y1),(x2,y2),(0,255,0),2)
+                    color = (0,255,0) if name else (128,128,128)
+                    draw = draw_chinese_text(draw,
+                        f"{name or '未知'} ({score:.2f})",
+                        (x1, max(0,y1-25)), 18, color)
+                cv2.imwrite(output, draw)
+                self._log(f"已保存标注图: {output}", "ok")
+            elif not results and not body_mode:
+                self._log("未检测到任何人脸", "warn")
 
     def _run_video(self, source: str, output_path: str):
         """识别视频文件"""
         threshold    = self.args.get("threshold", 0.45)
         skip_frames  = self.args.get("skip_frames", 2)
         min_neighbors = self.args.get("min_neighbors", 3)
+        body_mode    = self.args.get("body", False)
 
         import cv2, numpy as np
 
@@ -1441,6 +1723,8 @@ class MoeFaceCLI:
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         self._log(f"🎬 视频: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
+        if body_mode:
+            self._log("🔍 人体姿态检测模式")
         CLIColors.p("")
 
         out = tmp_out = None
@@ -1451,6 +1735,11 @@ class MoeFaceCLI:
             os.close(tmp_fd)
             out = cv2.VideoWriter(tmp_out, cv2.VideoWriter_fourcc(*"mp4v"),
                                   fps, (w, h))
+
+        # 视频模式下的 MediaPipe（连续帧模式，新 API）
+        _pose_marker = None
+        if body_mode and _ensure_mediapipe(self._log):
+            _pose_marker = _get_pose_landmarker(self._log, mode='video')
 
         frame_idx = 0
         try:
@@ -1469,28 +1758,42 @@ class MoeFaceCLI:
                     self._progress(frame_idx, total, 0, f"帧 {frame_idx}/{total}")
 
                 if frame_idx % skip_frames == 0:
-                    gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    faces = _anime_cascade.detectMultiScale(
-                        gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                        minSize=(20,20), maxSize=(800,800)
-                    )
-                    for (x, y, fw, fh) in faces:
-                        x1, y1 = max(0,x), max(0,y)
-                        x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
-                        face = frame[y1:y2, x1:x2]
-                        if face.size == 0:
-                            continue
-                        face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                        name, score = recognize_face(face_rgb, self.db, threshold)
-                        if name:
-                            cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
-                            frame = draw_chinese_text(frame,
-                                f"{name} ({score:.2f})",
-                                (x1, max(0,y1-25)), 16, (0,255,0))
-                            self.stats["found_names"][name] = \
-                                self.stats["found_names"].get(name, 0) + 1
+                    if body_mode and _pose_marker:
+                        # ── 人体姿态检测（新 API）──
+                        import cv2
+                        from mediapipe.tasks.python import vision as mp_vision
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        mp_image = mp_vision.Image.create_from_numpy_array(frame_rgb)
+                        results = _pose_marker.detect_for_video(mp_image, frame_idx)
+                        if results.pose_landmarks:
+                            frame = draw_body_skeleton(
+                                frame, results, show_labels=False
+                            )
+                        self.stats["processed"] += 1
+                    else:
+                        # ── 人脸识别 ──
+                        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        faces = _anime_cascade.detectMultiScale(
+                            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                            minSize=(20,20), maxSize=(800,800)
+                        )
+                        for (x, y, fw, fh) in faces:
+                            x1, y1 = max(0,x), max(0,y)
+                            x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
+                            face = frame[y1:y2, x1:x2]
+                            if face.size == 0:
+                                continue
+                            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                            name, score = recognize_face(face_rgb, self.db, threshold)
+                            if name:
+                                cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                                frame = draw_chinese_text(frame,
+                                    f"{name} ({score:.2f})",
+                                    (x1, max(0,y1-25)), 16, (0,255,0))
+                                self.stats["found_names"][name] = \
+                                    self.stats["found_names"].get(name, 0) + 1
 
-                    self.stats["processed"] += 1
+                        self.stats["processed"] += 1
 
                 if out:
                     out.write(frame)
@@ -1500,6 +1803,8 @@ class MoeFaceCLI:
             cap.release()
             if out:
                 out.release()
+            if _pose_marker:
+                _pose_marker.close()
 
         CLIColors.clear_line()
         CLIColors.p(f"\n  {CLIColors.SUCCESS}✓ 处理完成{CLIColors.RESET}："
@@ -1514,6 +1819,7 @@ class MoeFaceCLI:
         """摄像头实时识别"""
         threshold    = self.args.get("threshold", 0.45)
         min_neighbors = self.args.get("min_neighbors", 3)
+        body_mode    = self.args.get("body", False)
 
         import cv2
         camera_id = self.args.get("camera_id", 0)
@@ -1523,8 +1829,15 @@ class MoeFaceCLI:
             return
 
         self._log(f"📷 摄像头 {camera_id} 已启动，按 Q 退出")
+        if body_mode:
+            self._log("🔍 人体姿态检测模式")
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         delay_ms = max(int(1000 / fps), 1)
+
+        # 摄像头模式下的 MediaPipe（连续帧模式，新 API）
+        _pose_marker = None
+        if body_mode and _ensure_mediapipe(self._log):
+            _pose_marker = _get_pose_landmarker(self._log, mode='video')
 
         try:
             while not self.stop_evt.is_set():
@@ -1532,29 +1845,46 @@ class MoeFaceCLI:
                 if not ret:
                     continue
 
-                gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = _anime_cascade.detectMultiScale(
-                    gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                    minSize=(20,20), maxSize=(800,800)
-                )
-                for (x, y, fw, fh) in faces:
-                    x1, y1 = max(0,x), max(0,y)
-                    x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
-                    face = frame[y1:y2, x1:x2]
-                    if face.size == 0:
-                        continue
-                    face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                    name, score = recognize_face(face_rgb, self.db, threshold)
-                    cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
-                    frame = draw_chinese_text(frame,
-                        f"{name or '?'} ({score:.2f})",
-                        (x1, max(0,y1-25)), 14, (0,255,0))
+                if body_mode and _pose_marker:
+                    # ── 人体姿态检测（新 API）──
+                    import cv2
+                    from mediapipe.tasks.python import vision as mp_vision
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp_vision.Image.create_from_numpy_array(frame_rgb)
+                    import time
+                    timestamp_ms = int(time.time() * 1000)
+                    results = _pose_marker.detect_for_video(mp_image, timestamp_ms)
+                    if results.pose_landmarks:
+                        frame = draw_body_skeleton(
+                            frame, results, show_labels=False
+                        )
+                else:
+                    # ── 人脸识别 ──
+                    gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    faces = _anime_cascade.detectMultiScale(
+                        gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                        minSize=(20,20), maxSize=(800,800)
+                    )
+                    for (x, y, fw, fh) in faces:
+                        x1, y1 = max(0,x), max(0,y)
+                        x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
+                        face = frame[y1:y2, x1:x2]
+                        if face.size == 0:
+                            continue
+                        face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                        name, score = recognize_face(face_rgb, self.db, threshold)
+                        cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                        frame = draw_chinese_text(frame,
+                            f"{name or '?'} ({score:.2f})",
+                            (x1, max(0,y1-25)), 14, (0,255,0))
 
                 cv2.imshow("MoeFace CLI (按 Q 退出)", frame)
                 if cv2.waitKey(delay_ms) & 0xFF in (ord("q"), ord("Q")):
                     break
         finally:
             cap.release()
+            if _pose_marker:
+                _pose_marker.close()
             cv2.destroyAllWindows()
             self._log("摄像头已关闭", "done")
 
@@ -1603,6 +1933,7 @@ class MoeFaceCLI:
   {CLIColors.LGREEN}--skip-frames{CLIColors.RESET}  视频跳帧数 (默认: 2)
   {CLIColors.LGREEN}--min-neighbors{CLIColors.RESET}检测灵敏度 1~10 (默认: 3)
   {CLIColors.LGREEN}--rebuild{CLIColors.RESET}      强制重建特征库
+  {CLIColors.LGREEN}--body{CLIColors.RESET}         启用人体姿态检测（绘制骨骼连线）
   {CLIColors.LGREEN}--list{CLIColors.RESET}         列出所有可用特征库
 
 {CLIColors.TITLE}示例:{CLIColors.RESET}
@@ -1610,6 +1941,8 @@ class MoeFaceCLI:
   {CLIColors.MAGENTA}python recognize.py --mode cli --camera --threshold 0.6{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode cli --source 图片.jpg --output annotated.jpg{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --db-name 永雏塔菲{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 照片.jpg --body --output pose.jpg{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --camera --body{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode gui{CLIColors.RESET}
 """)
 
@@ -1680,6 +2013,11 @@ def _parse_args():
         help="强制重建特征库"
     )
     parser.add_argument(
+        "--body",
+        action="store_true",
+        help="启用人体姿态检测模式（绘制骨骼连线）"
+    )
+    parser.add_argument(
         "--list", "-l",
         action="store_true",
         help="列出所有可用特征库"
@@ -1718,6 +2056,7 @@ if __name__ == "__main__":
             "rebuild":      args.rebuild,
             "camera":       args.camera,
             "camera_id":    args.camera_id,
+            "body":         args.body,
         }
         cli = MoeFaceCLI(cli_args)
         try:
