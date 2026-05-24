@@ -424,155 +424,212 @@ def draw_chinese_text(img, text, position, font_size=18, color=(0, 255, 0)):
         return img
 
 
-# ── 人体姿态检测（MediaPipe Pose）─────────────────────────────────────────
-_mp_pose_ready = False
-_mp_pose = None
+# ── 人体姿态检测（ONNX Runtime + YOLO Pose，兼容 Python 3.13）──────────
 
-# 人体关键点索引（MediaPipe Pose 33个关键点中我们需要的）
-BODY_KEYPOINTS = {
-    "nose": 0,
-    "left_eye": 2,
-    "right_eye": 5,
-    "left_shoulder": 11,
-    "right_shoulder": 12,
-    "left_elbow": 13,
-    "right_elbow": 14,
-    "left_wrist": 15,
-    "right_wrist": 16,
-    "left_hip": 23,
-    "right_hip": 24,
-    "left_knee": 25,
-    "right_knee": 26,
-    "left_ankle": 27,
-    "right_ankle": 28,
-}
-
-# 骨骼连线：两两关键点索引之间的连接
-BODY_CONNECTIONS = [
-    # 头部 → 眼睛
-    (0, 2), (0, 5),
-    # 头部 → 肩膀
-    (0, 11), (0, 12),
-    # 双肩
-    (11, 12),
-    # 左臂：肩 → 肘 → 腕
-    (11, 13), (13, 15),
-    # 右臂：肩 → 肘 → 腕
-    (12, 14), (14, 16),
-    # 躯干：肩 → 髋
-    (11, 23), (12, 24),
-    # 髋部
-    (23, 24),
-    # 左腿：髋 → 膝 → 踝
-    (23, 25), (25, 27),
-    # 右腿：髋 → 膝 → 踝
-    (24, 26), (26, 28),
+# ── COCO 17 关键点（YOLO Pose / OpenPose 标准）──
+# 用于 ONNX Runtime YOLO Pose 推理
+COCO_KEYPOINT_NAMES = [
+    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist", "left_hip", "right_hip",
+    "left_knee", "right_knee", "left_ankle", "right_ankle",
 ]
 
-# 关键点中文名称（用于显示）
+# COCO 17 关键点中文名称
 BODY_KEYPOINT_LABELS = {
     0: "鼻子",
-    2: "左眼",
-    5: "右眼",
-    11: "左肩",
-    12: "右肩",
-    13: "左肘",
-    14: "右肘",
-    15: "左腕",
-    16: "右腕",
-    23: "左髋",
-    24: "右髋",
-    25: "左膝",
-    26: "右膝",
-    27: "左踝",
-    28: "右踝",
+    1: "左眼",
+    2: "右眼",
+    3: "左耳",
+    4: "右耳",
+    5: "左肩",
+    6: "右肩",
+    7: "左肘",
+    8: "右肘",
+    9: "左腕",
+    10: "右腕",
+    11: "左髋",
+    12: "右髋",
+    13: "左膝",
+    14: "右膝",
+    15: "左踝",
+    16: "右踝",
 }
 
-def _ensure_mediapipe(log_fn=print):
-    """确保 MediaPipe PoseLandmarker 已加载（懒加载）"""
-    global _mp_pose_ready, _mp_pose
-    if _mp_pose_ready:
+# COCO 17 关键点骨骼连线
+BODY_CONNECTIONS = [
+    # 头部
+    (0, 1), (0, 2), (1, 3), (2, 4),
+    # 躯干
+    (5, 6), (5, 11), (6, 12), (11, 12),
+    # 左臂
+    (5, 7), (7, 9),
+    # 右臂
+    (6, 8), (8, 10),
+    # 左腿
+    (11, 13), (13, 15),
+    # 右腿
+    (12, 14), (14, 16),
+]
+
+# 人体关键点索引映射（保持兼容旧接口）
+BODY_KEYPOINTS = {
+    "nose": 0, "left_eye": 1, "right_eye": 2,
+    "left_shoulder": 5, "right_shoulder": 6,
+    "left_elbow": 7, "right_elbow": 8,
+    "left_wrist": 9, "right_wrist": 10,
+    "left_hip": 11, "right_hip": 12,
+    "left_knee": 13, "right_knee": 14,
+    "left_ankle": 15, "right_ankle": 16,
+}
+
+# ONNX Runtime YOLO Pose 会话缓存
+_onnx_pose_session = None
+_onnx_pose_ready = False
+
+def _ensure_pose_engine(log_fn=print):
+    """确保 ONNX Runtime Pose 引擎已加载（兼容 Python 3.13）"""
+    global _onnx_pose_ready
+    if _onnx_pose_ready:
         return True
     try:
-        import mediapipe as mp
-        # 检查新 API（mediapipe 0.10+）
-        if hasattr(mp, 'tasks') and hasattr(mp.tasks, 'vision'):
-            _mp_pose = 'new_api'   # 新 API
-        else:
-            _mp_pose = 'old_api'   # 旧 API（mp.solutions）
-        _mp_pose_ready = True
-        log_fn("✅ MediaPipe Pose 已就绪喵~")
+        import onnxruntime
+        _onnx_pose_ready = True
+        log_fn("✅ ONNX Runtime Pose 已就绪喵~")
         return True
     except ImportError:
-        log_fn("❌ 未安装 mediapipe，请运行: pip install mediapipe")
+        log_fn("❌ 未安装 onnxruntime，请运行: pip install onnxruntime")
         return False
 
 
-def _get_pose_landmarker(log_fn=print, mode='image'):
-    """创建并返回 PoseLandmarker 实例（新 API）"""
-    import mediapipe as mp
-    from mediapipe.tasks import python as mp_python
-    from mediapipe.tasks.python import vision
+def _get_pose_session(log_fn=print):
+    """创建并返回 ONNX Runtime YOLO Pose 推理会话"""
+    import onnxruntime
 
-    # 下载模型文件（如果不存在）
     model_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        'pose_landmarker.task'
+        'yolo11n-pose.onnx'
     )
     if not os.path.exists(model_path):
-        log_fn("⬇️  首次运行，正在下载姿态检测模型（约 6MB）...")
+        log_fn("⬇️  首次运行，正在下载姿态检测模型（yolo11n-pose ONNX）...")
         import urllib.request
-        url = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task'
+        # 从 ultralytics 官方下载
+        url = 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.onnx'
         try:
             urllib.request.urlretrieve(url, model_path)
             log_fn(f"✅ 模型已保存: {model_path}")
-        except Exception as e:
-            log_fn(f"❌ 模型下载失败: {e}")
-            return None
+        except Exception:
+            # GitHub 下载失败时用镜像
+            log_fn("⏳ GitHub 下载失败，尝试镜像...")
+            url2 = 'https://gitee.com/mirrors_ultralytics/ultralytics-assets/releases/download/v8.3.0/yolo11n-pose.onnx'
+            try:
+                urllib.request.urlretrieve(url2, model_path)
+                log_fn(f"✅ 模型已保存（镜像）: {model_path}")
+            except Exception as e2:
+                log_fn(f"❌ 模型下载失败，请手动下载 yolo11n-pose.onnx 放到项目目录: {e2}")
+                return None
 
-    base_opts = mp_python.BaseOptions(model_asset_path=model_path)
-    options = vision.PoseLandmarkerOptions(
-        base_options=base_opts,
-        running_mode=(
-            vision.RunningMode.IMAGE
-            if mode == 'image'
-            else vision.RunningMode.VIDEO
-        ),
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-        num_poses=1,
-    )
-    return vision.PoseLandmarker.create_from_options(options)
+    # 验证 ONNX 文件有效性
+    if os.path.getsize(model_path) < 1024 * 1024:  # 正常应该 > 1MB
+        log_fn("❌ 模型文件损坏或不完整，请删除后重新下载")
+        os.unlink(model_path)
+        return None
+
+    session = onnxruntime.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+    return session
 
 
 def detect_body_pose(image_bgr, log_fn=print):
-    """检测单张图片中的人体姿态，返回检测结果（含 landmark 列表）"""
-    if not _ensure_mediapipe(log_fn):
+    """检测单张图片中的人体姿态，返回关键点列表
+    返回: list of list，每个人是 [[x1,y1,conf1], [x2,y2,conf2], ...]（17 个关键点）
+    """
+    if not _ensure_pose_engine(log_fn):
         return None
-    import cv2, numpy as np
-    from mediapipe.tasks.python import vision as mp_vision
+    import cv2
+    import numpy as np
 
     h, w = image_bgr.shape[:2]
     # 限制最大分辨率提高速度
     max_dim = 1280
+    scale = 1.0
     if max(h, w) > max_dim:
         scale = max_dim / max(h, w)
         image_bgr = cv2.resize(image_bgr, (int(w * scale), int(h * scale)))
         h, w = image_bgr.shape[:2]
 
-    marker = _get_pose_landmarker(log_fn, mode='image')
-    if marker is None:
+    session = _get_pose_session(log_fn)
+    if session is None:
         return None
 
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    mp_image = mp_vision.Image.create_from_numpy_array(image_rgb)
+    # YOLO 前处理：letterbox resize 到 640x640
+    img_size = 640
+    img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-    try:
-        result = marker.detect(mp_image)
-        return result
-    finally:
-        marker.close()
+    # letterbox
+    shape = img_rgb.shape[:2]
+    r = min(img_size / shape[0], img_size / shape[1])
+    new_shape = (int(shape[1] * r), int(shape[0] * r))
+    pad_w = img_size - new_shape[0]
+    pad_h = img_size - new_shape[1]
+    top, left = pad_h // 2, pad_w // 2
+
+    img_resized = cv2.resize(img_rgb, new_shape, interpolation=cv2.INTER_LINEAR)
+    img_padded = np.full((img_size, img_size, 3), 114, dtype=np.uint8)
+    img_padded[top:top + new_shape[1], left:left + new_shape[0]] = img_resized
+
+    # 归一化
+    blob = img_padded.astype(np.float32) / 255.0
+    blob = np.transpose(blob, (2, 0, 1))  # HWC -> CHW
+    blob = np.expand_dims(blob, 0)  # 添加 batch 维度
+
+    # ONNX 推理
+    input_name = session.get_inputs()[0].name
+    outputs = session.run(None, {input_name: blob})
+
+    # YOLO Pose 输出解析
+    # 输出 shape: (1, 56, 8400) -> (8400, 56)
+    # 前 4 个是 bbox (cx, cy, w, h)，接着是 1 个置信度，后面 51 个是 17 个关键点 (x, y, conf)
+    pred = outputs[0][0]  # (56, 8400)
+    pred = pred.T  # (8400, 56)
+
+    # 检查输出维度
+    num_keypoints = 17
+    expected_cols = 4 + 1 + num_keypoints * 3  # bbox + conf + 17*3 kp
+
+    if pred.shape[1] >= expected_cols:
+        # YOLO11 格式: 4 bbox + 1 conf + 51 kp
+        confidences = pred[:, 4]
+        kps = pred[:, 5:5 + num_keypoints * 3].reshape(-1, num_keypoints, 3)
+    elif pred.shape[1] >= 4 + num_keypoints * 3:
+        # YOLOv8 格式（无单独 conf 列）: 4 bbox + 51 kp
+        confidences = pred[:, 4]  # 用 bbox conf 代替
+        kps = pred[:, 5:5 + num_keypoints * 3].reshape(-1, num_keypoints, 3)
+    else:
+        log_fn("❌ 模型输出格式不匹配")
+        return None
+
+    # 过滤低置信度
+    mask = confidences > 0.25
+    if not mask.any():
+        return None
+
+    filtered = kps[mask]
+    best_idx = np.argmax(confidences[mask])
+    best_kps = filtered[best_idx]  # (17, 3) -> (x, y, conf)
+
+    # 反 letterbox 变换：关键点坐标从 640x640 映射回原图
+    all_persons = []
+    for det in filtered:
+        kps_norm = []
+        for kp in det:
+            kx = (kp[0] - left) / r / w
+            ky = (kp[1] - top) / r / h
+            kx = max(0.0, min(1.0, kx))
+            ky = max(0.0, min(1.0, ky))
+            kps_norm.append([kx, ky, float(kp[2])])
+        all_persons.append(kps_norm)
+
+    return all_persons
 
 
 def draw_body_skeleton(image_bgr, pose_results,
@@ -581,31 +638,27 @@ def draw_body_skeleton(image_bgr, pose_results,
                        line_thickness=2,
                        point_radius=5,
                        show_labels=True):
-    """在图像上绘制身体骨骼连线 + 关键点圆圈 + 标签"""
+    """在图像上绘制身体骨骼连线 + 关键点圆圈 + 标签
+    pose_results: list of list，每个人是 [[x,y,conf], ...]（归一化坐标）
+    """
     import cv2
     h, w = image_bgr.shape[:2]
 
-    # 新 API: pose_results.pose_landmarks 是 list[NormalizedLandmarks]
-    if (pose_results is None or
-            not hasattr(pose_results, 'pose_landmarks') or
-            not pose_results.pose_landmarks):
+    if pose_results is None or len(pose_results) == 0:
         return image_bgr
 
     # 只画第一个检测到的人
-    landmarks = pose_results.pose_landmarks[0]
+    landmarks = pose_results[0]
 
     # 1. 画连线（骨骼）
     for (idx1, idx2) in BODY_CONNECTIONS:
         if idx1 >= len(landmarks) or idx2 >= len(landmarks):
             continue
-        lm1 = landmarks[idx1]
-        lm2 = landmarks[idx2]
-        # 新 API 用 visibility 或 presence（float 0~1）
-        v1 = getattr(lm1, 'visibility', 1.0) or 1.0
-        v2 = getattr(lm2, 'visibility', 1.0) or 1.0
-        if v1 > 0.5 and v2 > 0.5:
-            x1, y1 = int(lm1.x * w), int(lm1.y * h)
-            x2, y2 = int(lm2.x * w), int(lm2.y * h)
+        kp1 = landmarks[idx1]
+        kp2 = landmarks[idx2]
+        if kp1[2] > 0.5 and kp2[2] > 0.5:  # 置信度阈值
+            x1, y1 = int(kp1[0] * w), int(kp1[1] * h)
+            x2, y2 = int(kp2[0] * w), int(kp2[1] * h)
             cv2.line(image_bgr, (x1, y1), (x2, y2),
                     line_color, line_thickness)
 
@@ -613,10 +666,9 @@ def draw_body_skeleton(image_bgr, pose_results,
     for idx, label in BODY_KEYPOINT_LABELS.items():
         if idx >= len(landmarks):
             continue
-        lm = landmarks[idx]
-        v = getattr(lm, 'visibility', 1.0) or 1.0
-        if v > 0.5:
-            x, y = int(lm.x * w), int(lm.y * h)
+        kp = landmarks[idx]
+        if kp[2] > 0.5:
+            x, y = int(kp[0] * w), int(kp[1] * h)
             cv2.circle(image_bgr, (x, y), point_radius, point_color, -1)
             cv2.circle(image_bgr, (x, y), point_radius + 1, line_color, 1)
 
@@ -625,10 +677,9 @@ def draw_body_skeleton(image_bgr, pose_results,
         for idx, label in BODY_KEYPOINT_LABELS.items():
             if idx >= len(landmarks):
                 continue
-            lm = landmarks[idx]
-            v = getattr(lm, 'visibility', 1.0) or 1.0
-            if v > 0.5:
-                x, y = int(lm.x * w), int(lm.y * h)
+            kp = landmarks[idx]
+            if kp[2] > 0.5:
+                x, y = int(kp[0] * w), int(kp[1] * h)
                 image_bgr = draw_chinese_text(
                     image_bgr, label, (x + 8, y - 8),
                     font_size=12, color=(255, 255, 255)
@@ -681,9 +732,9 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             return
 
         if body_mode:
-            # ── 人体姿态检测模式 ──
+            # ── 人体姿态检测模式（ONNX Runtime + YOLO Pose）──
             pose_results = detect_body_pose(img, log_fn)
-            if pose_results and pose_results.pose_landmarks:
+            if pose_results and len(pose_results) > 0:
                 log_fn("✅ 检测到人体姿态，正在绘制骨骼...")
                 img = draw_body_skeleton(img, pose_results)
             else:
@@ -751,11 +802,9 @@ def process_video_file(source: str, database: dict, output_path=None,
     found_names: set = set()
 
     # 视频模式下 MediaPipe 使用连续帧模式（更快）
-    _pose_marker = None
-    if body_mode and _ensure_mediapipe(log_fn):
-        import mediapipe as mp
-        from mediapipe.tasks.python import vision as mp_vision
-        _pose_marker = _get_pose_landmarker(log_fn, mode='video')
+    _pose_session = None
+    if body_mode and _ensure_pose_engine(log_fn):
+        _pose_session = _get_pose_session(log_fn)
 
     try:
         while True:
@@ -770,17 +819,13 @@ def process_video_file(source: str, database: dict, output_path=None,
                 pct = frame_idx / total * 100
                 log_fn(f"进度: {pct:.1f}%  ({frame_idx}/{total})")
 
-            if body_mode and _pose_marker:
-                # ── 人体姿态检测（新 API）──
+            if body_mode and _pose_session:
+                # ── 人体姿态检测（ONNX Runtime）──
                 if frame_idx % skip_frames == 0:
-                    import cv2
-                    from mediapipe.tasks.python import vision as mp_vision
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    mp_image = mp_vision.Image.create_from_numpy_array(frame_rgb)
-                    results = _pose_marker.detect_for_video(mp_image, frame_idx)
-                    if results.pose_landmarks:
+                    pose_results = detect_body_pose(frame, log_fn)
+                    if pose_results and len(pose_results) > 0:
                         frame = draw_body_skeleton(
-                            frame, results, show_labels=False
+                            frame, pose_results, show_labels=False
                         )
                 if preview_fn and frame_idx % skip_frames == 0:
                     preview_fn(frame.copy())
@@ -818,8 +863,8 @@ def process_video_file(source: str, database: dict, output_path=None,
         cap.release()
         if out:
             out.release()
-        if _pose_marker:
-            _pose_marker.close()
+        if _pose_session:
+            pass  # ONNX session 不需要手动 close
 
     log_fn(f"✅ 处理完成: {frame_idx} 帧")
     if found_names and not body_mode:
@@ -1650,7 +1695,7 @@ class MoeFaceCLI:
             # ── 人体姿态检测 ──
             self._log("🔍 人体姿态检测模式")
             pose_results = detect_body_pose(img, self._log)
-            if pose_results and pose_results.pose_landmarks:
+            if pose_results and len(pose_results) > 0:
                 self._log("✅ 检测到人体姿态，绘制骨骼...")
                 img = draw_body_skeleton(img, pose_results)
             else:
@@ -1737,9 +1782,9 @@ class MoeFaceCLI:
                                   fps, (w, h))
 
         # 视频模式下的 MediaPipe（连续帧模式，新 API）
-        _pose_marker = None
-        if body_mode and _ensure_mediapipe(self._log):
-            _pose_marker = _get_pose_landmarker(self._log, mode='video')
+        _pose_session = None
+        if body_mode and _ensure_pose_engine(self._log):
+            _pose_session = _get_pose_session(self._log)
 
         frame_idx = 0
         try:
@@ -1758,16 +1803,12 @@ class MoeFaceCLI:
                     self._progress(frame_idx, total, 0, f"帧 {frame_idx}/{total}")
 
                 if frame_idx % skip_frames == 0:
-                    if body_mode and _pose_marker:
-                        # ── 人体姿态检测（新 API）──
-                        import cv2
-                        from mediapipe.tasks.python import vision as mp_vision
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        mp_image = mp_vision.Image.create_from_numpy_array(frame_rgb)
-                        results = _pose_marker.detect_for_video(mp_image, frame_idx)
-                        if results.pose_landmarks:
+                    if body_mode and _pose_session:
+                        # ── 人体姿态检测（ONNX Runtime）──
+                        pose_results = detect_body_pose(frame, self._log)
+                        if pose_results and len(pose_results) > 0:
                             frame = draw_body_skeleton(
-                                frame, results, show_labels=False
+                                frame, pose_results, show_labels=False
                             )
                         self.stats["processed"] += 1
                     else:
@@ -1803,8 +1844,8 @@ class MoeFaceCLI:
             cap.release()
             if out:
                 out.release()
-            if _pose_marker:
-                _pose_marker.close()
+            if _pose_session:
+                pass  # ONNX session 不需要手动 close
 
         CLIColors.clear_line()
         CLIColors.p(f"\n  {CLIColors.SUCCESS}✓ 处理完成{CLIColors.RESET}："
@@ -1834,10 +1875,10 @@ class MoeFaceCLI:
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         delay_ms = max(int(1000 / fps), 1)
 
-        # 摄像头模式下的 MediaPipe（连续帧模式，新 API）
-        _pose_marker = None
-        if body_mode and _ensure_mediapipe(self._log):
-            _pose_marker = _get_pose_landmarker(self._log, mode='video')
+        # 摄像头模式下的 ONNX Runtime Pose
+        _pose_session = None
+        if body_mode and _ensure_pose_engine(self._log):
+            _pose_session = _get_pose_session(self._log)
 
         try:
             while not self.stop_evt.is_set():
@@ -1845,18 +1886,12 @@ class MoeFaceCLI:
                 if not ret:
                     continue
 
-                if body_mode and _pose_marker:
-                    # ── 人体姿态检测（新 API）──
-                    import cv2
-                    from mediapipe.tasks.python import vision as mp_vision
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    mp_image = mp_vision.Image.create_from_numpy_array(frame_rgb)
-                    import time
-                    timestamp_ms = int(time.time() * 1000)
-                    results = _pose_marker.detect_for_video(mp_image, timestamp_ms)
-                    if results.pose_landmarks:
+                if body_mode and _pose_session:
+                    # ── 人体姿态检测（ONNX Runtime）──
+                    pose_results = detect_body_pose(frame, self._log)
+                    if pose_results and len(pose_results) > 0:
                         frame = draw_body_skeleton(
-                            frame, results, show_labels=False
+                            frame, pose_results, show_labels=False
                         )
                 else:
                     # ── 人脸识别 ──
@@ -1883,8 +1918,8 @@ class MoeFaceCLI:
                     break
         finally:
             cap.release()
-            if _pose_marker:
-                _pose_marker.close()
+            if _pose_session:
+                pass  # ONNX session 不需要手动 close
             cv2.destroyAllWindows()
             self._log("摄像头已关闭", "done")
 
