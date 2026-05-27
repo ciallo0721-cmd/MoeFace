@@ -17,7 +17,7 @@ import traceback
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Tuple
+from typing import Tuple, List, Optional, Dict, Any
 
 # ── 确保以脚本所在目录为基准路径 ────────────────────────────────────────────
 import sys as _sys
@@ -140,7 +140,6 @@ _thread_local = threading.local()
 def _get_thread_cascade():
     """获取当前线程的 CascadeClassifier（每个线程独立）"""
     if not hasattr(_thread_local, 'cascade'):
-        # 每个线程创建自己的 CascadeClassifier 实例
         cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
         _thread_local.cascade = cascade
     return _thread_local.cascade
@@ -162,7 +161,6 @@ def _ensure_models(log_fn=print):
             if not CASCADE_PATH.exists():
                 log_fn("❌ (｡•́︿•̀｡),找不到 lbpcascade_animeface.xml")
                 return False
-            # 主线程也创建一个实例
             clf = cv2.CascadeClassifier(cascade_p)
             if clf.empty():
                 log_fn("❌ (｡•́︿•̀｡),CascadeClassifier 加载失败")
@@ -185,7 +183,6 @@ def _ensure_models(log_fn=print):
 def extract_features_from_image(image_path: str, log_fn=print):
     """提取单张图片的特征，若模型未就绪或图片无效则返回 None"""
     global _resnet, _device
-    # 确保模型已加载
     if not _ensure_models(log_fn):
         log_fn("❌ 模型未就绪，无法提取特征")
         return None
@@ -193,7 +190,6 @@ def extract_features_from_image(image_path: str, log_fn=print):
     import cv2, torch
     import numpy as np
 
-    # 获取当前线程专用的 CascadeClassifier
     cascade = _get_thread_cascade()
 
     try:
@@ -207,7 +203,6 @@ def extract_features_from_image(image_path: str, log_fn=print):
         log_fn(f"⚠️ 读取图片失败 {image_path}: {e}")
         return None
 
-    # 限制最大分辨率
     MAX_DIM = 4096
     h, w = img.shape[:2]
     if max(h, w) > MAX_DIM:
@@ -237,7 +232,6 @@ def extract_features_from_image(image_path: str, log_fn=print):
 
 def build_database(data_root: Path, log_fn=print, progress_fn=None):
     """构建特征库，确保模型已加载"""
-    # 确保模型就绪
     if not _ensure_models(log_fn):
         log_fn("❌ 模型加载失败，无法构建特征库")
         return {}
@@ -291,8 +285,7 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
 
     log_fn(f"多角色模式，共 {len(person_images)} 个角色，{total_images} 张图片")
 
-    # 使用单线程避免 CascadeClassifier 线程安全问题
-    max_workers = 1  # 强制单线程
+    max_workers = 1
     start_time = time.time()
     processed = [0]
 
@@ -321,7 +314,6 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
             return (person_name, np.mean(all_embs, axis=0))
         return None
 
-    # 单线程处理各角色（避免 OpenCV 级联分类器的线程安全问题）
     for person_name in person_images.keys():
         result = _process_person(person_name)
         if result is not None:
@@ -426,8 +418,6 @@ def draw_chinese_text(img, text, position, font_size=18, color=(0, 255, 0)):
 
 # ── 人体姿态检测（ONNX Runtime + YOLO Pose，兼容 Python 3.13）──────────
 
-# ── COCO 17 关键点（YOLO Pose / OpenPose 标准）──
-# 用于 ONNX Runtime YOLO Pose 推理
 COCO_KEYPOINT_NAMES = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -435,44 +425,20 @@ COCO_KEYPOINT_NAMES = [
     "left_knee", "right_knee", "left_ankle", "right_ankle",
 ]
 
-# COCO 17 关键点中文名称
 BODY_KEYPOINT_LABELS = {
-    0: "鼻子",
-    1: "左眼",
-    2: "右眼",
-    3: "左耳",
-    4: "右耳",
-    5: "左肩",
-    6: "右肩",
-    7: "左肘",
-    8: "右肘",
-    9: "左腕",
-    10: "右腕",
-    11: "左髋",
-    12: "右髋",
-    13: "左膝",
-    14: "右膝",
-    15: "左踝",
-    16: "右踝",
+    0: "鼻子", 1: "左眼", 2: "右眼", 3: "左耳", 4: "右耳",
+    5: "左肩", 6: "右肩", 7: "左肘", 8: "右肘",
+    9: "左腕", 10: "右腕", 11: "左髋", 12: "右髋",
+    13: "左膝", 14: "右膝", 15: "左踝", 16: "右踝",
 }
 
-# COCO 17 关键点骨骼连线
 BODY_CONNECTIONS = [
-    # 头部
     (0, 1), (0, 2), (1, 3), (2, 4),
-    # 躯干
     (5, 6), (5, 11), (6, 12), (11, 12),
-    # 左臂
-    (5, 7), (7, 9),
-    # 右臂
-    (6, 8), (8, 10),
-    # 左腿
-    (11, 13), (13, 15),
-    # 右腿
-    (12, 14), (14, 16),
+    (5, 7), (7, 9), (6, 8), (8, 10),
+    (11, 13), (13, 15), (12, 14), (14, 16),
 ]
 
-# 人体关键点索引映射（保持兼容旧接口）
 BODY_KEYPOINTS = {
     "nose": 0, "left_eye": 1, "right_eye": 2,
     "left_shoulder": 5, "right_shoulder": 6,
@@ -483,12 +449,11 @@ BODY_KEYPOINTS = {
     "left_ankle": 15, "right_ankle": 16,
 }
 
-# ONNX Runtime YOLO Pose 会话缓存
 _onnx_pose_session = None
 _onnx_pose_ready = False
 
 def _ensure_pose_engine(log_fn=print):
-    """确保 ONNX Runtime Pose 引擎已加载（兼容 Python 3.13）"""
+    """确保 ONNX Runtime Pose 引擎已加载"""
     global _onnx_pose_ready
     if _onnx_pose_ready:
         return True
@@ -501,7 +466,6 @@ def _ensure_pose_engine(log_fn=print):
         log_fn("❌ 未安装 onnxruntime，请运行: pip install onnxruntime")
         return False
 
-
 def _get_pose_session(log_fn=print):
     """创建并返回 ONNX Runtime YOLO Pose 推理会话"""
     import onnxruntime
@@ -513,13 +477,11 @@ def _get_pose_session(log_fn=print):
     if not os.path.exists(model_path):
         log_fn("⬇️  首次运行，正在下载姿态检测模型（yolo11n-pose ONNX）...")
         import urllib.request
-        # 从 ultralytics 官方下载
         url = 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.onnx'
         try:
             urllib.request.urlretrieve(url, model_path)
             log_fn(f"✅ 模型已保存: {model_path}")
         except Exception:
-            # GitHub 下载失败时用镜像
             log_fn("⏳ GitHub 下载失败，尝试镜像...")
             url2 = 'https://gitee.com/mirrors_ultralytics/ultralytics-assets/releases/download/v8.3.0/yolo11n-pose.onnx'
             try:
@@ -529,8 +491,7 @@ def _get_pose_session(log_fn=print):
                 log_fn(f"❌ 模型下载失败，请手动下载 yolo11n-pose.onnx 放到项目目录: {e2}")
                 return None
 
-    # 验证 ONNX 文件有效性
-    if os.path.getsize(model_path) < 1024 * 1024:  # 正常应该 > 1MB
+    if os.path.getsize(model_path) < 1024 * 1024:
         log_fn("❌ 模型文件损坏或不完整，请删除后重新下载")
         os.unlink(model_path)
         return None
@@ -538,18 +499,19 @@ def _get_pose_session(log_fn=print):
     session = onnxruntime.InferenceSession(model_path, providers=['CPUExecutionProvider'])
     return session
 
-
 def detect_body_pose(image_bgr, log_fn=print):
-    """检测单张图片中的人体姿态，返回关键点列表
-    返回: list of list，每个人是 [[x1,y1,conf1], [x2,y2,conf2], ...]（17 个关键点）
+    """
+    检测单张图片中的人体姿态，返回列表，每个元素为:
+        (x1, y1, x2, y2, keypoints)
+    其中 keypoints 是长度为 17 的列表，每个元素为 (x, y, conf) 归一化坐标
+    如果没有检测到人体，返回空列表
     """
     if not _ensure_pose_engine(log_fn):
-        return None
+        return []
     import cv2
     import numpy as np
 
     h, w = image_bgr.shape[:2]
-    # 限制最大分辨率提高速度
     max_dim = 1280
     scale = 1.0
     if max(h, w) > max_dim:
@@ -559,13 +521,11 @@ def detect_body_pose(image_bgr, log_fn=print):
 
     session = _get_pose_session(log_fn)
     if session is None:
-        return None
+        return []
 
-    # YOLO 前处理：letterbox resize 到 640x640
     img_size = 640
     img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-    # letterbox
     shape = img_rgb.shape[:2]
     r = min(img_size / shape[0], img_size / shape[1])
     new_shape = (int(shape[1] * r), int(shape[0] * r))
@@ -577,113 +537,115 @@ def detect_body_pose(image_bgr, log_fn=print):
     img_padded = np.full((img_size, img_size, 3), 114, dtype=np.uint8)
     img_padded[top:top + new_shape[1], left:left + new_shape[0]] = img_resized
 
-    # 归一化
     blob = img_padded.astype(np.float32) / 255.0
-    blob = np.transpose(blob, (2, 0, 1))  # HWC -> CHW
-    blob = np.expand_dims(blob, 0)  # 添加 batch 维度
+    blob = np.transpose(blob, (2, 0, 1))
+    blob = np.expand_dims(blob, 0)
 
-    # ONNX 推理
     input_name = session.get_inputs()[0].name
     outputs = session.run(None, {input_name: blob})
 
-    # YOLO Pose 输出解析
-    # 输出 shape: (1, 56, 8400) -> (8400, 56)
-    # 前 4 个是 bbox (cx, cy, w, h)，接着是 1 个置信度，后面 51 个是 17 个关键点 (x, y, conf)
     pred = outputs[0][0]  # (56, 8400)
     pred = pred.T  # (8400, 56)
 
-    # 检查输出维度
     num_keypoints = 17
-    expected_cols = 4 + 1 + num_keypoints * 3  # bbox + conf + 17*3 kp
+    expected_cols = 4 + 1 + num_keypoints * 3
 
     if pred.shape[1] >= expected_cols:
-        # YOLO11 格式: 4 bbox + 1 conf + 51 kp
+        bboxes = pred[:, :4]   # cx, cy, w, h
         confidences = pred[:, 4]
         kps = pred[:, 5:5 + num_keypoints * 3].reshape(-1, num_keypoints, 3)
     elif pred.shape[1] >= 4 + num_keypoints * 3:
-        # YOLOv8 格式（无单独 conf 列）: 4 bbox + 51 kp
-        confidences = pred[:, 4]  # 用 bbox conf 代替
+        bboxes = pred[:, :4]
+        confidences = pred[:, 4]
         kps = pred[:, 5:5 + num_keypoints * 3].reshape(-1, num_keypoints, 3)
     else:
         log_fn("❌ 模型输出格式不匹配")
-        return None
+        return []
 
-    # 过滤低置信度
     mask = confidences > 0.25
     if not mask.any():
-        return None
+        return []
 
-    filtered = kps[mask]
-    best_idx = np.argmax(confidences[mask])
-    best_kps = filtered[best_idx]  # (17, 3) -> (x, y, conf)
-
-    # 反 letterbox 变换：关键点坐标从 640x640 映射回原图
-    all_persons = []
-    for det in filtered:
+    persons = []
+    for i in np.where(mask)[0]:
+        cx, cy, bw, bh = bboxes[i]
+        # 将中心点+宽高转换为左上右下坐标 (原图坐标)
+        x1 = (cx - bw/2 - left) / r
+        y1 = (cy - bh/2 - top) / r
+        x2 = (cx + bw/2 - left) / r
+        y2 = (cy + bh/2 - top) / r
+        # 限制在图像范围内
+        x1 = max(0, min(w, x1))
+        y1 = max(0, min(h, y1))
+        x2 = max(0, min(w, x2))
+        y2 = max(0, min(h, y2))
+        # 关键点反 letterbox
         kps_norm = []
-        for kp in det:
+        for kp in kps[i]:
             kx = (kp[0] - left) / r / w
             ky = (kp[1] - top) / r / h
             kx = max(0.0, min(1.0, kx))
             ky = max(0.0, min(1.0, ky))
             kps_norm.append([kx, ky, float(kp[2])])
-        all_persons.append(kps_norm)
+        persons.append((int(x1), int(y1), int(x2), int(y2), kps_norm))
 
-    return all_persons
+    return persons
 
-
-def draw_body_skeleton(image_bgr, pose_results,
+def draw_body_skeleton(image_bgr, persons,
+                       bbox_color=(0, 255, 0),
                        line_color=(0, 255, 0),
                        point_color=(0, 255, 255),
+                       bbox_thickness=2,
                        line_thickness=2,
                        point_radius=5,
                        show_labels=True):
-    """在图像上绘制身体骨骼连线 + 关键点圆圈 + 标签
-    pose_results: list of list，每个人是 [[x,y,conf], ...]（归一化坐标）
+    """
+    在图像上绘制人体矩形框 + 骨骼连线 + 关键点圆圈 + 标签
+    persons: list of (x1, y1, x2, y2, keypoints)
     """
     import cv2
     h, w = image_bgr.shape[:2]
 
-    if pose_results is None or len(pose_results) == 0:
+    if not persons:
         return image_bgr
 
-    # 只画第一个检测到的人
-    landmarks = pose_results[0]
+    for (x1, y1, x2, y2, landmarks) in persons:
+        # 1. 绘制人体边界框
+        cv2.rectangle(image_bgr, (x1, y1), (x2, y2), bbox_color, bbox_thickness)
 
-    # 1. 画连线（骨骼）
-    for (idx1, idx2) in BODY_CONNECTIONS:
-        if idx1 >= len(landmarks) or idx2 >= len(landmarks):
-            continue
-        kp1 = landmarks[idx1]
-        kp2 = landmarks[idx2]
-        if kp1[2] > 0.5 and kp2[2] > 0.5:  # 置信度阈值
-            x1, y1 = int(kp1[0] * w), int(kp1[1] * h)
-            x2, y2 = int(kp2[0] * w), int(kp2[1] * h)
-            cv2.line(image_bgr, (x1, y1), (x2, y2),
-                    line_color, line_thickness)
+        # 2. 画骨骼连线
+        for (idx1, idx2) in BODY_CONNECTIONS:
+            if idx1 >= len(landmarks) or idx2 >= len(landmarks):
+                continue
+            kp1 = landmarks[idx1]
+            kp2 = landmarks[idx2]
+            if kp1[2] > 0.5 and kp2[2] > 0.5:
+                pt1 = (int(kp1[0] * w), int(kp1[1] * h))
+                pt2 = (int(kp2[0] * w), int(kp2[1] * h))
+                cv2.line(image_bgr, pt1, pt2, line_color, line_thickness)
 
-    # 2. 画关键点圆点
-    for idx, label in BODY_KEYPOINT_LABELS.items():
-        if idx >= len(landmarks):
-            continue
-        kp = landmarks[idx]
-        if kp[2] > 0.5:
-            x, y = int(kp[0] * w), int(kp[1] * h)
-            cv2.circle(image_bgr, (x, y), point_radius, point_color, -1)
-            cv2.circle(image_bgr, (x, y), point_radius + 1, line_color, 1)
-
-    # 3. 画中文标签
-    if show_labels:
+        # 3. 画关键点圆点
         for idx, label in BODY_KEYPOINT_LABELS.items():
             if idx >= len(landmarks):
                 continue
             kp = landmarks[idx]
             if kp[2] > 0.5:
                 x, y = int(kp[0] * w), int(kp[1] * h)
-                image_bgr = draw_chinese_text(
-                    image_bgr, label, (x + 8, y - 8),
-                    font_size=12, color=(255, 255, 255)
-                )
+                cv2.circle(image_bgr, (x, y), point_radius, point_color, -1)
+                cv2.circle(image_bgr, (x, y), point_radius + 1, line_color, 1)
+
+        # 4. 画中文标签（可选）
+        if show_labels:
+            for idx, label in BODY_KEYPOINT_LABELS.items():
+                if idx >= len(landmarks):
+                    continue
+                kp = landmarks[idx]
+                if kp[2] > 0.5:
+                    x, y = int(kp[0] * w), int(kp[1] * h)
+                    image_bgr = draw_chinese_text(
+                        image_bgr, label, (x + 8, y - 8),
+                        font_size=12, color=(255, 255, 255)
+                    )
 
     return image_bgr
 
@@ -716,7 +678,6 @@ def _add_audio(src_video, out_video, tmp_video):
         warnings.warn(f"音频合并失败: {e}")
         shutil.move(tmp_video, out_video)
 
-
 def process_image_file(source: str, database: dict, threshold=0.45,
                        min_neighbors=3, body_mode=False,
                        log_fn=print, preview_fn=None, done_fn=None):
@@ -731,36 +692,39 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             if done_fn: done_fn()
             return
 
+        # 人体姿态检测（如果需要）并绘制框+骨骼
         if body_mode:
-            # ── 人体姿态检测模式（ONNX Runtime + YOLO Pose）──
-            pose_results = detect_body_pose(img, log_fn)
-            if pose_results and len(pose_results) > 0:
-                log_fn("✅ 检测到人体姿态，正在绘制骨骼...")
-                img = draw_body_skeleton(img, pose_results)
+            persons = detect_body_pose(img, log_fn)
+            if persons:
+                log_fn(f"✅ 检测到 {len(persons)} 个人体，绘制框和骨骼...")
+                img = draw_body_skeleton(img, persons, show_labels=False)
             else:
-                log_fn("⚠️ 未检测到人体姿态喵~")
+                log_fn("⚠️ 未检测到人体喵~")
+
+        # 人脸识别（始终执行，无论 body_mode 是否开启，实现“同时检测”）
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = _anime_cascade.detectMultiScale(
+            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+            minSize=(20, 20), maxSize=(800, 800)
+        )
+        if body_mode:
+            log_fn(f"人脸识别额外检测到 {len(faces)} 张人脸")
         else:
-            # ── 原有人脸识别模式 ──
-            gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = _anime_cascade.detectMultiScale(
-                gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                minSize=(20, 20), maxSize=(800, 800)
-            )
             log_fn(f"检测到 {len(faces)} 张人脸")
 
-            for (x, y, w, h) in faces:
-                x1 = max(0, x); y1 = max(0, y)
-                x2 = min(img.shape[1], x + w)
-                y2 = min(img.shape[0], y + h)
-                face     = img[y1:y2, x1:x2]
-                if face.size == 0:
-                    continue
-                face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                name, score = recognize_face(face_rgb, database, threshold)
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
-                img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
-                log_fn(f"  {'✅' if name else '❓'} {txt}")
+        for (x, y, w, h) in faces:
+            x1 = max(0, x); y1 = max(0, y)
+            x2 = min(img.shape[1], x + w)
+            y2 = min(img.shape[0], y + h)
+            face = img[y1:y2, x1:x2]
+            if face.size == 0:
+                continue
+            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+            name, score = recognize_face(face_rgb, database, threshold)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
+            img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
+            log_fn(f"  {'✅' if name else '❓'} {txt}")
 
         if preview_fn:
             preview_fn(img)
@@ -788,7 +752,7 @@ def process_video_file(source: str, database: dict, output_path=None,
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     log_fn(f"视频信息: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
     if body_mode:
-        log_fn("🔍 人体姿态检测模式")
+        log_fn("🔍 同时开启: 人体姿态检测(框+骨骼) + 人脸角色识别")
 
     out = tmp_out = None
     if output_path:
@@ -800,11 +764,6 @@ def process_video_file(source: str, database: dict, output_path=None,
 
     frame_idx  = 0
     found_names: set = set()
-
-    # 视频模式下 MediaPipe 使用连续帧模式（更快）
-    _pose_session = None
-    if body_mode and _ensure_pose_engine(log_fn):
-        _pose_session = _get_pose_session(log_fn)
 
     try:
         while True:
@@ -819,41 +778,36 @@ def process_video_file(source: str, database: dict, output_path=None,
                 pct = frame_idx / total * 100
                 log_fn(f"进度: {pct:.1f}%  ({frame_idx}/{total})")
 
-            if body_mode and _pose_session:
-                # ── 人体姿态检测（ONNX Runtime）──
-                if frame_idx % skip_frames == 0:
-                    pose_results = detect_body_pose(frame, log_fn)
-                    if pose_results and len(pose_results) > 0:
-                        frame = draw_body_skeleton(
-                            frame, pose_results, show_labels=False
-                        )
-                if preview_fn and frame_idx % skip_frames == 0:
-                    preview_fn(frame.copy())
-            elif not body_mode:
-                # ── 人脸识别 ──
-                if frame_idx % skip_frames == 0:
-                    gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    faces = _anime_cascade.detectMultiScale(
-                        gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                        minSize=(20, 20), maxSize=(800, 800)
-                    )
-                    for (x, y, fw, fh) in faces:
-                        x1 = max(0, x); y1 = max(0, y)
-                        x2 = min(frame.shape[1], x + fw)
-                        y2 = min(frame.shape[0], y + fh)
-                        face = frame[y1:y2, x1:x2]
-                        if face.size == 0:
-                            continue
-                        face_rgb       = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                        name, score    = recognize_face(face_rgb, database, threshold)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
-                        frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
-                        if name:
-                            found_names.add(name)
+            # 人体姿态检测（如果启用）
+            if body_mode and frame_idx % skip_frames == 0:
+                persons = detect_body_pose(frame, log_fn)
+                if persons:
+                    frame = draw_body_skeleton(frame, persons, show_labels=False)
 
-                    if preview_fn:
-                        preview_fn(frame.copy())
+            # 人脸识别（始终执行，与 body_mode 无关）
+            if frame_idx % skip_frames == 0:
+                gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = _anime_cascade.detectMultiScale(
+                    gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                    minSize=(20, 20), maxSize=(800, 800)
+                )
+                for (x, y, fw, fh) in faces:
+                    x1 = max(0, x); y1 = max(0, y)
+                    x2 = min(frame.shape[1], x + fw)
+                    y2 = min(frame.shape[0], y + fh)
+                    face = frame[y1:y2, x1:x2]
+                    if face.size == 0:
+                        continue
+                    face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                    name, score = recognize_face(face_rgb, database, threshold)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
+                    frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
+                    if name:
+                        found_names.add(name)
+
+            if preview_fn and frame_idx % skip_frames == 0:
+                preview_fn(frame.copy())
 
             if out:
                 out.write(frame)
@@ -863,11 +817,9 @@ def process_video_file(source: str, database: dict, output_path=None,
         cap.release()
         if out:
             out.release()
-        if _pose_session:
-            pass  # ONNX session 不需要手动 close
 
     log_fn(f"✅ 处理完成: {frame_idx} 帧")
-    if found_names and not body_mode:
+    if found_names:
         log_fn(f"识别角色: {', '.join(sorted(found_names))}")
 
     if output_path and tmp_out and os.path.exists(tmp_out):
@@ -1007,7 +959,7 @@ class MoeFaceApp:
         self._auto_shutdown_cb.pack(anchor="w", padx=10, pady=2)
 
         self._body_mode_cb = tk.Checkbutton(
-            parent, text="🧍 人体姿态检测模式（骨骼连线）",
+            parent, text="🧍 人体姿态检测模式（框+骨骼，同时识别人脸角色）",
             variable=self._body_mode_var,
             bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
             activebackground=PANEL, activeforeground="#7c3aed"
@@ -1509,7 +1461,6 @@ class CLIColors:
         """生成进度条字符串（更明显）"""
         filled = int(width * percent)
         empty  = width - filled
-        # 使用更明显的字符
         bar = "█" * filled + "░" * empty
         percent_str = f"{percent * 100:5.1f}%"
         fg = fg_color or CLIColors.LGREEN
@@ -1568,7 +1519,6 @@ class MoeFaceCLI:
             return
         pct = min(current / total, 1.0)
         
-        # 计算 ETA
         eta_text = ""
         if elapsed > 0 and current > 0 and current < total:
             eta_sec = elapsed * (total - current) / current
@@ -1579,19 +1529,11 @@ class MoeFaceCLI:
             else:
                 eta_text = f"⏱️ 剩余: {int(eta_sec)}秒"
         
-        # 进度百分比和计数
         count_text = f"📊 {current}/{total}"
-        
-        # 生成进度条
         bar = CLIColors.progress_bar(pct, width=40)
-        
-        # 标签（当前角色）
         label_text = f" 🎭 {label[:20]}" if label and label.strip() else ""
-        
-        # 构建进度行
         line = f"\r{CLIColors.LCYAN}{bar}{CLIColors.RESET} {CLIColors.LYELLOW}{count_text}{CLIColors.RESET} {CLIColors.LGREEN}{eta_text}{CLIColors.RESET}{label_text}"
         
-        # 清除并打印
         CLIColors.clear_line()
         print(line, end="", flush=True)
         self._last_pct = pct
@@ -1603,13 +1545,9 @@ class MoeFaceCLI:
                     f" {CLIColors.MUTED}({count} 次){CLIColors.RESET}")
 
     def run(self):
-        # 打印 Banner
         print(self.BANNER)
 
-        # 步骤 1: 加载模型
         self._header("① 加载模型")
-        
-        # 检测设备
         import torch
         device_info = "NVIDIA GPU (CUDA)" if torch.cuda.is_available() else "CPU"
         CLIColors.p(f"  🔧 设备: {CLIColors.LGREEN}{device_info}{CLIColors.RESET}")
@@ -1620,7 +1558,6 @@ class MoeFaceCLI:
         
         CLIColors.p(f"  ✅ 模型加载完成！{CLIColors.LGREEN}(°▽°)/{CLIColors.RESET}")
 
-        # 步骤 2: 加载特征库
         self._header("② 加载特征库")
         db_name = self.args.get("db_name") or DEFAULT_DB_NAME
         CLIColors.p(f"  📚 特征库: {CLIColors.LCYAN}{db_name}{CLIColors.RESET}")
@@ -1637,14 +1574,13 @@ class MoeFaceCLI:
             progress_fn=lambda cur, tot, elapsed=0, lbl="": self._progress(cur, tot, elapsed, lbl)
         )
         
-        CLIColors.p("")  # 换行
+        CLIColors.p("")
         if not self.db:
             self._log("特征库为空，请检查 ./data 文件夹或添加角色图片", "error")
             sys.exit(1)
         
         CLIColors.p(f"\n  {CLIColors.SUCCESS}✨ 已加载 {len(self.db)} 个角色特征，就绪~ ✨{CLIColors.RESET}")
 
-        # 步骤 3: 执行识别
         source = self.args.get("source")
         output = self.args.get("output")
         camera = self.args.get("camera", False)
@@ -1671,17 +1607,15 @@ class MoeFaceCLI:
             self._print_help()
             sys.exit(1)
 
-        # 步骤 4: 统计报告
         self._print_report()
 
     def _run_image(self, path: str):
-        """识别单张图片"""
+        """识别单张图片（同时人体框+骨骼 + 人脸识别）"""
         self._log(f"📸 文件: {CLIColors.LCYAN}{path}{CLIColors.RESET}")
         threshold    = self.args.get("threshold", 0.45)
         min_neighbors = self.args.get("min_neighbors", 3)
         body_mode    = self.args.get("body", False)
 
-        results = []
         import cv2, numpy as np
 
         with open(path, "rb") as f:
@@ -1691,65 +1625,49 @@ class MoeFaceCLI:
             self._log("无法读取图片喵~", "error")
             return
 
+        # 人体姿态检测（如果需要）并绘制框+骨骼
         if body_mode:
-            # ── 人体姿态检测 ──
-            self._log("🔍 人体姿态检测模式")
-            pose_results = detect_body_pose(img, self._log)
-            if pose_results and len(pose_results) > 0:
-                self._log("✅ 检测到人体姿态，绘制骨骼...")
-                img = draw_body_skeleton(img, pose_results)
+            persons = detect_body_pose(img, self._log)
+            if persons:
+                self._log(f"✅ 检测到 {len(persons)} 个人体，绘制框和骨骼...")
+                img = draw_body_skeleton(img, persons, show_labels=False)
             else:
-                self._log("⚠️ 未检测到人体姿态喵~", "warn")
-        else:
-            # ── 人脸识别 ──
-            gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = _anime_cascade.detectMultiScale(
-                gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                minSize=(20, 20), maxSize=(800, 800)
-            )
-            self._log(f"检测到 {CLIColors.SUCCESS}{len(faces)}{CLIColors.RESET} 张人脸")
+                self._log("⚠️ 未检测到人体喵~", "warn")
 
-            for (x, y, w, h) in faces:
-                x1, y1 = max(0, x), max(0, y)
-                x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
-                face = img[y1:y2, x1:x2]
-                if face.size == 0:
-                    continue
-                face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                name, score = recognize_face(face_rgb, self.db, threshold)
-                tag = CLIColors.SUCCESS if name else CLIColors.MUTED
-                self._log(f"  {tag}{name or '未知'}{CLIColors.RESET} "
-                          f"{CLIColors.MUTED}({score:.2f}){CLIColors.RESET} "
-                          f"@ ({x1},{y1},{w}×{h})", "ok" if name else "skip")
-                results.append((name, score))
-                if name:
-                    self.stats["found_names"][name] = \
-                        self.stats["found_names"].get(name, 0) + 1
+        # 人脸识别（始终执行，无论 body_mode）
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = _anime_cascade.detectMultiScale(
+            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+            minSize=(20, 20), maxSize=(800, 800)
+        )
+        if body_mode:
+            self._log(f"人脸识别额外检测到 {len(faces)} 张人脸")
+        else:
+            self._log(f"检测到 {len(faces)} 张人脸")
+
+        for (x, y, w, h) in faces:
+            x1, y1 = max(0, x), max(0, y)
+            x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
+            face = img[y1:y2, x1:x2]
+            if face.size == 0:
+                continue
+            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+            name, score = recognize_face(face_rgb, self.db, threshold)
+            tag = CLIColors.SUCCESS if name else CLIColors.MUTED
+            self._log(f"  {tag}{name or '未知'}{CLIColors.RESET} "
+                      f"{CLIColors.MUTED}({score:.2f}){CLIColors.RESET} "
+                      f"@ ({x1},{y1},{w}×{h})", "ok" if name else "skip")
+            if name:
+                self.stats["found_names"][name] = \
+                    self.stats["found_names"].get(name, 0) + 1
 
         output = self.args.get("output")
         if output:
-            if body_mode:
-                # 身体姿态模式：直接保存绘制后的图片
-                cv2.imwrite(output, img)
-                self._log(f"已保存姿态检测图: {output}", "ok")
-            elif results:
-                # 人脸识别模式：绘制标注后保存
-                draw = img.copy()
-                for (x, y, w, h), (name, score) in zip(faces, results):
-                    x1, y1 = max(0, x), max(0, y)
-                    x2, y2 = min(img.shape[1], x+w), min(img.shape[0], y+h)
-                    cv2.rectangle(draw, (x1,y1),(x2,y2),(0,255,0),2)
-                    color = (0,255,0) if name else (128,128,128)
-                    draw = draw_chinese_text(draw,
-                        f"{name or '未知'} ({score:.2f})",
-                        (x1, max(0,y1-25)), 18, color)
-                cv2.imwrite(output, draw)
-                self._log(f"已保存标注图: {output}", "ok")
-            elif not results and not body_mode:
-                self._log("未检测到任何人脸", "warn")
+            cv2.imwrite(output, img)
+            self._log(f"已保存标注图: {output}", "ok")
 
     def _run_video(self, source: str, output_path: str):
-        """识别视频文件"""
+        """识别视频文件（同时人体框+骨骼 + 人脸识别）"""
         threshold    = self.args.get("threshold", 0.45)
         skip_frames  = self.args.get("skip_frames", 2)
         min_neighbors = self.args.get("min_neighbors", 3)
@@ -1769,7 +1687,7 @@ class MoeFaceCLI:
 
         self._log(f"🎬 视频: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
         if body_mode:
-            self._log("🔍 人体姿态检测模式")
+            self._log("🔍 同时开启: 人体姿态检测(框+骨骼) + 人脸角色识别")
         CLIColors.p("")
 
         out = tmp_out = None
@@ -1780,11 +1698,6 @@ class MoeFaceCLI:
             os.close(tmp_fd)
             out = cv2.VideoWriter(tmp_out, cv2.VideoWriter_fourcc(*"mp4v"),
                                   fps, (w, h))
-
-        # 视频模式下的 MediaPipe（连续帧模式，新 API）
-        _pose_session = None
-        if body_mode and _ensure_pose_engine(self._log):
-            _pose_session = _get_pose_session(self._log)
 
         frame_idx = 0
         try:
@@ -1802,99 +1715,14 @@ class MoeFaceCLI:
                 if total > 0:
                     self._progress(frame_idx, total, 0, f"帧 {frame_idx}/{total}")
 
+                # 人体姿态检测（如果启用）
+                if body_mode and frame_idx % skip_frames == 0:
+                    persons = detect_body_pose(frame, self._log)
+                    if persons:
+                        frame = draw_body_skeleton(frame, persons, show_labels=False)
+
+                # 人脸识别（始终执行）
                 if frame_idx % skip_frames == 0:
-                    if body_mode and _pose_session:
-                        # ── 人体姿态检测（ONNX Runtime）──
-                        pose_results = detect_body_pose(frame, self._log)
-                        if pose_results and len(pose_results) > 0:
-                            frame = draw_body_skeleton(
-                                frame, pose_results, show_labels=False
-                            )
-                        self.stats["processed"] += 1
-                    else:
-                        # ── 人脸识别 ──
-                        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        faces = _anime_cascade.detectMultiScale(
-                            gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                            minSize=(20,20), maxSize=(800,800)
-                        )
-                        for (x, y, fw, fh) in faces:
-                            x1, y1 = max(0,x), max(0,y)
-                            x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
-                            face = frame[y1:y2, x1:x2]
-                            if face.size == 0:
-                                continue
-                            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                            name, score = recognize_face(face_rgb, self.db, threshold)
-                            if name:
-                                cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
-                                frame = draw_chinese_text(frame,
-                                    f"{name} ({score:.2f})",
-                                    (x1, max(0,y1-25)), 16, (0,255,0))
-                                self.stats["found_names"][name] = \
-                                    self.stats["found_names"].get(name, 0) + 1
-
-                        self.stats["processed"] += 1
-
-                if out:
-                    out.write(frame)
-                frame_idx += 1
-
-        finally:
-            cap.release()
-            if out:
-                out.release()
-            if _pose_session:
-                pass  # ONNX session 不需要手动 close
-
-        CLIColors.clear_line()
-        CLIColors.p(f"\n  {CLIColors.SUCCESS}✓ 处理完成{CLIColors.RESET}："
-                    f" {frame_idx} 帧，识别了 {self.stats['processed']} 个关键帧")
-
-        if output_path and tmp_out and os.path.exists(tmp_out):
-            self._log("正在合并音频...")
-            _add_audio(source, output_path, tmp_out)
-            self._log(f"已保存: {output_path}", "ok")
-
-    def _run_camera(self):
-        """摄像头实时识别"""
-        threshold    = self.args.get("threshold", 0.45)
-        min_neighbors = self.args.get("min_neighbors", 3)
-        body_mode    = self.args.get("body", False)
-
-        import cv2
-        camera_id = self.args.get("camera_id", 0)
-        cap = cv2.VideoCapture(camera_id)
-        if not cap.isOpened():
-            self._log(f"无法打开摄像头 {camera_id}喵~", "error")
-            return
-
-        self._log(f"📷 摄像头 {camera_id} 已启动，按 Q 退出")
-        if body_mode:
-            self._log("🔍 人体姿态检测模式")
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        delay_ms = max(int(1000 / fps), 1)
-
-        # 摄像头模式下的 ONNX Runtime Pose
-        _pose_session = None
-        if body_mode and _ensure_pose_engine(self._log):
-            _pose_session = _get_pose_session(self._log)
-
-        try:
-            while not self.stop_evt.is_set():
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-
-                if body_mode and _pose_session:
-                    # ── 人体姿态检测（ONNX Runtime）──
-                    pose_results = detect_body_pose(frame, self._log)
-                    if pose_results and len(pose_results) > 0:
-                        frame = draw_body_skeleton(
-                            frame, pose_results, show_labels=False
-                        )
-                else:
-                    # ── 人脸识别 ──
                     gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     faces = _anime_cascade.detectMultiScale(
                         gray, scaleFactor=1.02, minNeighbors=min_neighbors,
@@ -1911,15 +1739,84 @@ class MoeFaceCLI:
                         cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
                         frame = draw_chinese_text(frame,
                             f"{name or '?'} ({score:.2f})",
-                            (x1, max(0,y1-25)), 14, (0,255,0))
+                            (x1, max(0,y1-25)), 16, (0,255,0))
+                        if name:
+                            self.stats["found_names"][name] = \
+                                self.stats["found_names"].get(name, 0) + 1
+
+                    self.stats["processed"] += 1
+
+                if out:
+                    out.write(frame)
+                frame_idx += 1
+
+        finally:
+            cap.release()
+            if out:
+                out.release()
+
+        CLIColors.clear_line()
+        CLIColors.p(f"\n  {CLIColors.SUCCESS}✓ 处理完成{CLIColors.RESET}："
+                    f" {frame_idx} 帧，识别了 {self.stats['processed']} 个关键帧")
+
+        if output_path and tmp_out and os.path.exists(tmp_out):
+            self._log("正在合并音频...")
+            _add_audio(source, output_path, tmp_out)
+            self._log(f"已保存: {output_path}", "ok")
+
+    def _run_camera(self):
+        """摄像头实时识别（同时人体框+骨骼 + 人脸识别）"""
+        threshold    = self.args.get("threshold", 0.45)
+        min_neighbors = self.args.get("min_neighbors", 3)
+        body_mode    = self.args.get("body", False)
+
+        import cv2
+        camera_id = self.args.get("camera_id", 0)
+        cap = cv2.VideoCapture(camera_id)
+        if not cap.isOpened():
+            self._log(f"无法打开摄像头 {camera_id}喵~", "error")
+            return
+
+        self._log(f"📷 摄像头 {camera_id} 已启动，按 Q 退出")
+        if body_mode:
+            self._log("🔍 同时开启: 人体姿态检测(框+骨骼) + 人脸角色识别")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        delay_ms = max(int(1000 / fps), 1)
+
+        try:
+            while not self.stop_evt.is_set():
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+
+                if body_mode:
+                    persons = detect_body_pose(frame, self._log)
+                    if persons:
+                        frame = draw_body_skeleton(frame, persons, show_labels=False)
+
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = _anime_cascade.detectMultiScale(
+                    gray, scaleFactor=1.02, minNeighbors=min_neighbors,
+                    minSize=(20,20), maxSize=(800,800)
+                )
+                for (x, y, fw, fh) in faces:
+                    x1, y1 = max(0,x), max(0,y)
+                    x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
+                    face = frame[y1:y2, x1:x2]
+                    if face.size == 0:
+                        continue
+                    face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                    name, score = recognize_face(face_rgb, self.db, threshold)
+                    cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
+                    frame = draw_chinese_text(frame,
+                        f"{name or '?'} ({score:.2f})",
+                        (x1, max(0,y1-25)), 14, (0,255,0))
 
                 cv2.imshow("MoeFace CLI (按 Q 退出)", frame)
                 if cv2.waitKey(delay_ms) & 0xFF in (ord("q"), ord("Q")):
                     break
         finally:
             cap.release()
-            if _pose_session:
-                pass  # ONNX session 不需要手动 close
             cv2.destroyAllWindows()
             self._log("摄像头已关闭", "done")
 
@@ -1968,16 +1865,14 @@ class MoeFaceCLI:
   {CLIColors.LGREEN}--skip-frames{CLIColors.RESET}  视频跳帧数 (默认: 2)
   {CLIColors.LGREEN}--min-neighbors{CLIColors.RESET}检测灵敏度 1~10 (默认: 3)
   {CLIColors.LGREEN}--rebuild{CLIColors.RESET}      强制重建特征库
-  {CLIColors.LGREEN}--body{CLIColors.RESET}         启用人体姿态检测（绘制骨骼连线）
+  {CLIColors.LGREEN}--body{CLIColors.RESET}         启用人体姿态检测（框+骨骼，同时识别人脸角色）
   {CLIColors.LGREEN}--list{CLIColors.RESET}         列出所有可用特征库
 
 {CLIColors.TITLE}示例:{CLIColors.RESET}
-  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --output out.mp4{CLIColors.RESET}
-  {CLIColors.MAGENTA}python recognize.py --mode cli --camera --threshold 0.6{CLIColors.RESET}
-  {CLIColors.MAGENTA}python recognize.py --mode cli --source 图片.jpg --output annotated.jpg{CLIColors.RESET}
-  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --db-name 永雏塔菲{CLIColors.RESET}
-  {CLIColors.MAGENTA}python recognize.py --mode cli --source 照片.jpg --body --output pose.jpg{CLIColors.RESET}
-  {CLIColors.MAGENTA}python recognize.py --mode cli --camera --body{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --output out.mp4 --body{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --camera --threshold 0.6 --body{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 图片.jpg --output annotated.jpg --body{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --db-name 永雏塔菲 --body{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode gui{CLIColors.RESET}
 """)
 
@@ -1988,7 +1883,7 @@ def _parse_args():
         prog="MoeFace",
         description="MoeFace 动漫人脸识别系统",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="示例: python recognize.py --mode cli --source video.mp4 --output out.mp4"
+        epilog="示例: python recognize.py --mode cli --source video.mp4 --output out.mp4 --body"
     )
 
     parser.add_argument(
@@ -2050,7 +1945,7 @@ def _parse_args():
     parser.add_argument(
         "--body",
         action="store_true",
-        help="启用人体姿态检测模式（绘制骨骼连线）"
+        help="启用人体姿态检测模式（绘制边界框+骨骼连线，同时识别人脸角色）"
     )
     parser.add_argument(
         "--list", "-l",
@@ -2063,9 +1958,8 @@ def _parse_args():
 
 # ── 入口 ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 预先导入 cv2 用于线程本地存储
-    import cv2
-    
+    import cv2   # 预先导入用于线程本地存储
+
     args = _parse_args()
 
     if args.list:
