@@ -959,7 +959,7 @@ class MoeFaceApp:
         self._auto_shutdown_cb.pack(anchor="w", padx=10, pady=2)
 
         self._body_mode_cb = tk.Checkbutton(
-            parent, text="🧍 人体姿态检测模式（框+骨骼，同时识别人脸角色）",
+            parent, text="🧍 人体姿态检测模式",
             variable=self._body_mode_var,
             bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
             activebackground=PANEL, activeforeground="#7c3aed"
