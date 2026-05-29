@@ -273,4 +273,4 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
 
 ## SEO
 
-**项目关键词**：动漫人脸识别、二次元角色识别、VTuber识别、动漫人脸检测、FaceNet动漫识别、OpenCV动漫分类器、AI动漫识别、虚拟主播识别、角色特征库 神楽めあ 神乐mea Kagura Mea 湊あくあ 湊-阿库娅 Minato 三吱 猫又おかゆ  潤羽るしあ 润羽露西娅 白上フブキ 白上吹雪 神楽七奈 かぐらなな 鹿乃 卢本伟 wh1t3zz 虎哥 刀哥 沃玛 warma hanser 憨八嘎 泠鸢yousa 冷鸟 怒九笑
+**项目关键词**：动漫人脸识别、二次元角色识别、VTuber识别、动漫人脸检测、FaceNet动漫识别、OpenCV动漫分类器、AI动漫识别、虚拟主播识别、角色特征库 神楽めあ 神乐mea Kagura Mea 湊あくあ 湊-阿库娅 Minato 三吱 猫又おかゆ  潤羽るしあ 润羽露西娅 白上フブキ 白上吹雪 神楽七奈 かぐらなな 鹿乃 卢本伟 wh1t3zz 虎哥 刀哥 沃玛 warma hanser 憨八嘎 泠鸢yousa 冷鸟 怒九笑 永雏塔菲 塔菲 acetaffy taffy 
