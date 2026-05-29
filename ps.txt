@@ -1,2 +1,1 @@
-2026年4月12日
-ps:有一个exe版本的,无需python环境就能用的,在https://github.com/ciallo0721-cmd/MoeFace/releases/download/v3.0/Moeface.rar
+明天把https://chat.deepseek.com/a/chat/s/79a79d9a-9e4c-454c-a1e2-c38bc6e87fe3里面的扩充
