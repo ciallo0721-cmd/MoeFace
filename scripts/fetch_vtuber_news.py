@@ -221,64 +221,57 @@ def parse_nijisanji_news(html):
     return news_list
 
 # ==================== 微博抓取（使用 crawl4weibo）====================
+# ==================== 微博抓取（使用 crawl4weibo，直接传入 Cookie）====================
 def fetch_weibo_news() -> List[Dict]:
-    """
-    使用 crawl4weibo 库获取微博用户动态
-    该库内部处理了反爬、签名等问题，无需手动管理 Cookie
-    """
     all_news = []
     if not WEIBO_USERS:
         return all_news
 
+    # 从环境变量获取 Cookie（已在 workflow 中配置）
+    cookie_str = os.getenv('WEIBO_COOKIE', '')
+    if not cookie_str:
+        print("[警告] 未设置 WEIBO_COOKIE 环境变量，微博抓取可能失败")
+        return all_news
+
     print(f"[INFO] 开始使用 crawl4weibo 抓取 {len(WEIBO_USERS)} 个微博用户")
     try:
-        client = WeiboClient()
+        # 直接传入 Cookie，避免启动浏览器
+        client = WeiboClient(cookie=cookie_str)
         for user in WEIBO_USERS:
             uid = user['uid']
             name = user['name']
             print(f"  [微博] 抓取: {name} (UID: {uid})")
             try:
-                # 获取用户发布的微博（第一页，展开长微博）
                 posts = client.get_user_posts(uid, page=1, expand=True)
                 if not posts:
                     print(f"    [警告] 未获取到微博")
                     continue
-                
+
                 count = 0
                 for post in posts:
-                    # 时间过滤（只保留 3 天内）
-                    created_at = post.created_at  # 可能是字符串或 datetime 对象
+                    # 时间处理
+                    created_at = post.created_at
                     if isinstance(created_at, str):
                         try:
-                            # 尝试解析常见格式
                             dt = datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
                         except:
-                            # 如果解析失败，使用 parse_weibo_datetime 备用
-                            dt_str = parse_weibo_datetime(created_at)
-                            try:
-                                dt = datetime.strptime(dt_str, '%Y-%m-%d %H:%M')
-                            except:
-                                dt = datetime.now() - timedelta(days=10)  # 旧内容
+                            continue
                     else:
                         dt = created_at
-                    
                     if dt < DATE_THRESHOLD:
                         continue
-                    
-                    # 提取文本
+
                     text = post.text.strip()
                     if not text:
                         continue
-                    # 移除 HTML 标签（可能还有）
                     text = re.sub('<[^<]+?>', '', text)
                     if len(text) > 200:
                         text = text[:197] + "..."
-                    
-                    # 链接
+
                     post_id = post.id
                     link = f"https://m.weibo.cn/detail/{post_id}"
-                    pub_date = dt.strftime('%Y-%m-%d %H:%M') if not isinstance(created_at, str) else parse_weibo_datetime(created_at)
-                    
+                    pub_date = dt.strftime('%Y-%m-%d %H:%M')
+
                     all_news.append({
                         'title': text,
                         'link': link,
@@ -289,14 +282,14 @@ def fetch_weibo_news() -> List[Dict]:
                     if count >= 15:
                         break
                 print(f"  [OK] {name}: 获取到 {count} 条最近动态")
-                time.sleep(1)  # 礼貌间隔
+                time.sleep(1)
             except Exception as e:
                 print(f"  [错误] {name} 抓取失败: {e}")
                 traceback.print_exc()
     except Exception as e:
         print(f"  [错误] 初始化 WeiboClient 失败: {e}")
         traceback.print_exc()
-    
+
     print(f"  [OK] 微博: 共 {len(all_news)} 条")
     return all_news
 
