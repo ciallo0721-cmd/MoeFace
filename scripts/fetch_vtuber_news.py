@@ -249,15 +249,13 @@ def fetch_weibo_news() -> List[Dict]:
 
                 count = 0
                 for post in posts:
-                    # 安全处理时间
                     created_at = post.created_at
                     dt = None
                     if isinstance(created_at, str):
+                        # 尝试解析字符串时间
                         try:
-                            # 尝试常见格式
                             dt = datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
                         except:
-                            # 尝试其他格式
                             try:
                                 dt = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
                             except:
@@ -267,17 +265,23 @@ def fetch_weibo_news() -> List[Dict]:
                                     pass
                     elif isinstance(created_at, datetime):
                         dt = created_at
-                    
-                    if dt is None:
-                        # 无法解析时间，跳过
+                    else:
                         continue
-                    
+
+                    if dt is None:
+                        continue
+
+                    # 移除时区信息，使其与 DATE_THRESHOLD 可比
+                    if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+
                     if dt < DATE_THRESHOLD:
                         continue
 
                     text = post.text.strip()
                     if not text:
                         continue
+                    # 移除 HTML 标签
                     text = re.sub('<[^<]+?>', '', text)
                     if len(text) > 200:
                         text = text[:197] + "..."
