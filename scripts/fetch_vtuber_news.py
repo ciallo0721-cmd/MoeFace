@@ -29,39 +29,10 @@ NEWS_SOURCES = [
 
 BILIBILI_UIDS = ['33064694', '1265680561']
 
-# 微博配置 - 完整的浏览器请求头
-WEIBO_CONFIG = {
-    'enabled': True,
-    'monitor_uids': ['7618923072'],
-    'monitor_names': ['永雏塔菲'],
-    'headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Referer': 'https://m.weibo.cn/',
-        'Origin': 'https://m.weibo.cn',
-        'Connection': 'keep-alive',
-        'X-Requested-With': 'XMLHttpRequest',
-        'sec-ch-ua': '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-    }
-}
-
-# 从环境变量读取 Cookie
-weibo_cookie_env = os.getenv('WEIBO_COOKIE', '')
-print(f"[DEBUG] WEIBO_COOKIE 环境变量存在: {bool(weibo_cookie_env)}")
-if weibo_cookie_env:
-    WEIBO_CONFIG['headers']['Cookie'] = weibo_cookie_env
-    print("[配置] ✅ 微博 Cookie 已加载")
-else:
-    print("[配置] ℹ️ 微博 Cookie 未配置")
+# 微博配置 - 使用页面解析，无需 Cookie
+WEIBO_USERS = [
+    {'uid': '7618923072', 'name': '永雏塔菲'}
+]
 
 SMTP_HOST = os.getenv('SMTP_HOST', 'smtp.qq.com')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '465'))
@@ -85,11 +56,8 @@ if BILI_COOKIE:
 else:
     print("[配置] ⚠️ B站 Cookie 未配置")
 
-# ==================== WBI 签名 ====================
-MIXIN_KEY_ENC_TAB = [
-    46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,
-    61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52
-]
+# ==================== WBI 签名 (B站用) ====================
+MIXIN_KEY_ENC_TAB = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]
 
 def get_wbi_keys():
     try:
@@ -142,7 +110,7 @@ def fetch_json(url, params=None, timeout=15):
         print(f"  [错误] 抓取失败 {url}: {e}")
         return None
 
-# ==================== 日期处理 ====================
+# ==================== 日期辅助 ====================
 def normalize_date(date_str):
     if not date_str:
         return None
@@ -177,7 +145,7 @@ def parse_weibo_datetime(dt_str):
             return m.group(1)
         return datetime.now().strftime('%Y-%m-%d %H:%M')
 
-# ==================== Hololive 解析 ====================
+# ==================== Hololive / Nijisanji 解析（同前，略）====================
 def parse_hololive_news(html):
     news_list = []
     try:
@@ -216,7 +184,6 @@ def parse_hololive_news(html):
         print(f"  [错误] Hololive 解析失败: {e}")
     return news_list
 
-# ==================== Nijisanji 解析 ====================
 def parse_nijisanji_news(html):
     news_list = []
     try:
@@ -249,50 +216,41 @@ def parse_nijisanji_news(html):
         print(f"  [错误] Nijisanji 解析失败: {e}")
     return news_list
 
-# ==================== 微博抓取 (完整请求头版本) ====================
-def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> List[Dict]:
+# ==================== 微博抓取（页面解析，无 Cookie）====================
+def fetch_weibo_posts(uid, name, limit=15):
     weibo_news = []
-    print(f"  [微博] 抓取: {name} (UID: {uid})")
-    
+    print(f"  [微博] 抓取: {name} (UID: {uid}) 通过页面解析")
     try:
-        containerid = f"107603{uid}"
-        url = f"https://m.weibo.cn/api/container/getIndex?type=uid&value={uid}&containerid={containerid}"
-        
-        # 使用完整的浏览器模拟 Headers
-        headers = WEIBO_CONFIG['headers'].copy()
-        
-        # 检查 Cookie
-        cookie_val = headers.get('Cookie', '')
-        if not cookie_val:
-            print(f"  [错误] 未找到 Cookie")
-            return []
-        
-        print(f"  [DEBUG] Cookie 长度: {len(cookie_val)}")
-        
+        url = f"https://m.weibo.cn/u/{uid}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+        }
         resp = requests.get(url, headers=headers, timeout=15)
-        
         if resp.status_code != 200:
             print(f"  [错误] HTTP {resp.status_code}")
             return []
-        
-        data = resp.json()
-        
-        if data.get('ok') != 1:
-            print(f"  [警告] API 返回异常: ok={data.get('ok')}, msg={data.get('msg')}")
+        html = resp.text
+        # 提取 $render_data
+        match = re.search(r'window\.\$render_data\s*=\s*({.*?})\s*</script>', html, re.DOTALL)
+        if not match:
+            print(f"  [错误] 未找到 $render_data")
             return []
-        
-        cards = data.get('data', {}).get('cards', [])
+        data = json.loads(match.group(1))
+        # 定位 cards
+        cards = None
+        if 'data' in data and 'cards' in data['data']:
+            cards = data['data']['cards']
+        elif 'cards' in data:
+            cards = data['cards']
         if not cards:
-            print(f"  [微博] {name} 无卡片数据")
+            print(f"  [错误] 无卡片数据")
             return []
-        
-        print(f"  [DEBUG] 获取到 {len(cards)} 个卡片")
-        
         for card in cards[:limit*2]:
-            mblog = card.get('mblog') or card.get('status')
+            mblog = card.get('mblog')
             if not mblog:
                 continue
-            
             raw_text = mblog.get('text', '')
             title = re.sub('<[^<]+?>', '', raw_text).strip()
             if not title:
@@ -300,7 +258,6 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                     title = "转发微博"
                 else:
                     continue
-            
             if mblog.get('retweeted_status'):
                 retweet = mblog['retweeted_status']
                 retweet_text = re.sub('<[^<]+?>', '', retweet.get('text', ''))
@@ -308,13 +265,10 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                     title = f"[转发] {retweet_text}"
                 else:
                     title = f"{title} // {retweet_text}"
-            
             if len(title) > 200:
                 title = title[:197] + "..."
-            
             post_id = mblog.get('id', '')
             link = f"https://m.weibo.cn/detail/{post_id}" if post_id else f"https://m.weibo.cn/u/{uid}"
-            
             created_at = mblog.get('created_at', '')
             if created_at:
                 pub_date = parse_weibo_datetime(created_at)
@@ -322,17 +276,9 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
                     continue
             else:
                 pub_date = datetime.now().strftime('%Y-%m-%d %H:%M')
-            
-            weibo_news.append({
-                'title': title,
-                'link': link,
-                'pub_date': pub_date,
-                'source': f'微博: {name}'
-            })
-            
+            weibo_news.append({'title': title, 'link': link, 'pub_date': pub_date, 'source': f'微博: {name}'})
             if len(weibo_news) >= limit:
                 break
-        
         # 去重
         unique = []
         seen = set()
@@ -341,26 +287,20 @@ def fetch_weibo_posts(uid: str, limit: int = 10, name: str = '微博用户') -> 
             if key not in seen:
                 seen.add(key)
                 unique.append(item)
-        
         print(f"  [OK] {name}: 获取到 {len(unique)} 条最近动态")
         return unique
-        
     except Exception as e:
-        print(f"  [错误] {name} 抓取失败: {e}")
+        print(f"  [错误] {name} 抓取异常: {e}")
         traceback.print_exc()
         return []
 
-def fetch_weibo_news() -> List[Dict]:
+def fetch_weibo_news():
     all_news = []
-    if not WEIBO_CONFIG['enabled'] or not WEIBO_CONFIG['monitor_uids']:
-        return []
-    cookie_present = bool(WEIBO_CONFIG['headers'].get('Cookie', ''))
-    print(f"[INFO] 开始抓取 {len(WEIBO_CONFIG['monitor_uids'])} 个微博用户 (Cookie: {'已配置' if cookie_present else '未配置'})")
-    for idx, uid in enumerate(WEIBO_CONFIG['monitor_uids']):
-        name = WEIBO_CONFIG['monitor_names'][idx] if idx < len(WEIBO_CONFIG['monitor_names']) else f'用户{uid}'
-        posts = fetch_weibo_posts(uid, 15, name)
+    print(f"[INFO] 开始抓取 {len(WEIBO_USERS)} 个微博用户 (无Cookie页面解析)")
+    for user in WEIBO_USERS:
+        posts = fetch_weibo_posts(user['uid'], user['name'], 15)
         all_news.extend(posts)
-        time.sleep(2)
+        time.sleep(2)  # 避免请求过快
     print(f"  [OK] 微博: 共 {len(all_news)} 条")
     return all_news
 
@@ -372,7 +312,7 @@ def fetch_bilibili_dynamics(uid, limit=10):
         params = {"host_mid": uid, "offset": "", "page_size": limit}
         data = fetch_json(url, params)
         if not data or data.get('code') != 0:
-            print(f"  [警告] B站 {uid} 返回错误: {data.get('message') if data else '空数据'}")
+            print(f"  [警告] B站 {uid} 错误: {data.get('message') if data else '空'}")
             return []
         items = data.get('data', {}).get('items', [])
         for item in items[:limit]:
@@ -491,7 +431,7 @@ def send_email(html_body, recipients):
 # ==================== 主函数 ====================
 def main():
     print("=" * 50)
-    print("VTuber News Fetcher (近3天新闻)")
+    print("VTuber News Fetcher (近3天新闻) - 页面解析版")
     print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"过滤器: 只收录 {DATE_THRESHOLD.strftime('%Y-%m-%d')} 之后的新闻")
     print("=" * 50)
