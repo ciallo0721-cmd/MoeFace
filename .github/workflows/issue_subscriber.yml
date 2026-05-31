@@ -51,4 +51,5 @@ jobs:
           git diff --cached --quiet || git commit -m "chore: update subscribers.txt (auto)"
           git push
         env:
+          ALLOW_SELF_REPLY: true
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

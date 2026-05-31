@@ -224,10 +224,10 @@ def handle_other_issue():
         return
 
     # 如果评论者是仓库所有者，不自动回复
-    owner = get_env('ISSUE_AUTHOR')
-    if user_login == owner:
-        print(f"[自动回复] 跳过仓库作者 @{owner} 的评论")
-        return
+ #   owner = get_env('ISSUE_AUTHOR')
+  #  if user_login == owner:
+   #     print(f"[自动回复] 跳过仓库作者 @{owner} 的评论")
+   #     return
 
     # 检查是否包含"取消订阅"/"unsubscribe"关键词（跨 issue 也支持）
     unsub_keywords = ['取消订阅', 'unsubscribe', '退订', '不要发了', '停止发送']
