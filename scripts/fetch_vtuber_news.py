@@ -222,21 +222,23 @@ def parse_nijisanji_news(html):
 
 # ==================== 微博抓取（使用 crawl4weibo）====================
 # ==================== 微博抓取（使用 crawl4weibo，直接传入 Cookie）====================
+# ai太好用了你们知道吗
 def fetch_weibo_news() -> List[Dict]:
     all_news = []
     if not WEIBO_USERS:
         return all_news
 
-    # 从环境变量获取 Cookie（已在 workflow 中配置）
+    # 移除 cookie=cookie_str 参数
     cookie_str = os.getenv('WEIBO_COOKIE', '')
     if not cookie_str:
-        print("[警告] 未设置 WEIBO_COOKIE 环境变量，微博抓取可能失败")
-        return all_news
+        print("[警告] 未设置 WEIBO_COOKIE 环境变量，将尝试无 Cookie 抓取")
+    else:
+        print("[配置] 已加载 WEIBO_COOKIE")
 
     print(f"[INFO] 开始使用 crawl4weibo 抓取 {len(WEIBO_USERS)} 个微博用户")
     try:
-        # 直接传入 Cookie，避免启动浏览器
-        client = WeiboClient(cookie=cookie_str)
+        # 直接初始化，库内部会自动从环境变量中寻找 WEIBO_COOKIE[reference:0]
+        client = WeiboClient()
         for user in WEIBO_USERS:
             uid = user['uid']
             name = user['name']
