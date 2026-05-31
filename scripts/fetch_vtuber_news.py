@@ -10,7 +10,6 @@ import time
 import hashlib
 import urllib.parse
 import traceback
-import feedparser
 from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -18,6 +17,9 @@ from email.utils import formatdate
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
 from urllib.parse import urljoin
+
+# 新增：导入 crawl4weibo
+from crawl4weibo import WeiboClient
 
 # ==================== 配置 ====================
 CURRENT_DATE = datetime.now()
@@ -30,17 +32,9 @@ NEWS_SOURCES = [
 
 BILIBILI_UIDS = ['33064694', '1265680561']
 
-# 微博配置 - 多重备用策略
+# 微博配置 - 使用 crawl4weibo（无需手动管理 Cookie）
 WEIBO_USERS = [
     {'uid': '7618923072', 'name': '永雏塔菲'}
-]
-
-# RSSHub 备用实例
-RSSHUB_INSTANCES = [
-    "https://rsshub.app",
-    "https://rsshub.rssforever.com",
-    "https://rsshub.feeded.xyz",
-    "https://hub.slarker.me",
 ]
 
 SMTP_HOST = os.getenv('SMTP_HOST', 'smtp.qq.com')
@@ -226,178 +220,83 @@ def parse_nijisanji_news(html):
         print(f"  [错误] Nijisanji 解析失败: {e}")
     return news_list
 
-# ==================== 微博抓取（多重备用策略）====================
-def fetch_weibo_via_render_data(uid, name, limit=15):
-    """策略1: 页面内嵌 $render_data"""
-    try:
-        url = f"https://m.weibo.cn/u/{uid}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code != 200:
-            return None
-        html = resp.text
-        # 多种可能的匹配模式
-        patterns = [
-            r'window\.\$render_data\s*=\s*({.*?})\s*</script>',
-            r'window\.\$render_data\s*=\s*({.*?});\s*</script>',
-            r'<script>window\.\$render_data\s*=\s*({.*?})</script>',
-        ]
-        data = None
-        for pattern in patterns:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
-                try:
-                    data = json.loads(match.group(1))
-                    break
-                except:
-                    continue
-        if not data:
-            return None
-        cards = None
-        if 'data' in data and 'cards' in data['data']:
-            cards = data['data']['cards']
-        elif 'cards' in data:
-            cards = data['cards']
-        if not cards:
-            return None
-        return parse_weibo_cards(cards, uid, name, limit)
-    except Exception as e:
-        print(f"    [策略1失败] {e}")
-        return None
-
-def fetch_weibo_via_api(uid, name, limit=15):
-    """策略2: 直接调用 API（无 Cookie，可能被限）"""
-    try:
-        containerid = f"107603{uid}"
-        url = f"https://m.weibo.cn/api/container/getIndex?type=uid&value={uid}&containerid={containerid}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://m.weibo.cn/',
-            'Accept': 'application/json, text/plain, */*',
-            'X-Requested-With': 'XMLHttpRequest',
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        if data.get('ok') != 1:
-            return None
-        cards = data.get('data', {}).get('cards', [])
-        if not cards:
-            return None
-        return parse_weibo_cards(cards, uid, name, limit)
-    except Exception as e:
-        print(f"    [策略2失败] {e}")
-        return None
-
-def fetch_weibo_via_rss(uid, name, limit=15):
-    """策略3: RSSHub 公共实例"""
-    for instance in RSSHUB_INSTANCES:
-        try:
-            rss_url = f"{instance}/weibo/user/{uid}"
-            feed = feedparser.parse(rss_url)
-            if feed.bozo == 0 and feed.entries:
-                news = []
-                for entry in feed.entries[:limit]:
-                    title = entry.get('title', '').strip()
-                    if not title:
-                        continue
-                    link = entry.get('link', '')
-                    pub_date_raw = entry.get('published', '')
-                    if pub_date_raw:
-                        try:
-                            from email.utils import parsedate_to_datetime
-                            dt = parsedate_to_datetime(pub_date_raw)
-                            if dt < datetime.now() - timedelta(days=3):
-                                continue
-                            pub_date = dt.strftime('%Y-%m-%d %H:%M')
-                        except:
-                            pub_date = pub_date_raw
-                    else:
-                        pub_date = datetime.now().strftime('%Y-%m-%d %H:%M')
-                    if len(title) > 200:
-                        title = title[:197] + "..."
-                    news.append({'title': title, 'link': link, 'pub_date': pub_date, 'source': f'微博: {name}'})
-                if news:
-                    print(f"    [策略3成功] 使用 {instance}")
-                    return news
-        except:
-            continue
-    return None
-
-def parse_weibo_cards(cards, uid, name, limit):
-    """解析微博卡片数据"""
-    news = []
-    for card in cards[:limit*2]:
-        mblog = card.get('mblog')
-        if not mblog:
-            continue
-        raw_text = mblog.get('text', '')
-        title = re.sub('<[^<]+?>', '', raw_text).strip()
-        if not title:
-            if mblog.get('retweeted_status'):
-                title = "转发微博"
-            else:
-                continue
-        if mblog.get('retweeted_status'):
-            retweet = mblog['retweeted_status']
-            retweet_text = re.sub('<[^<]+?>', '', retweet.get('text', ''))
-            if title == "转发微博":
-                title = f"[转发] {retweet_text}"
-            else:
-                title = f"{title} // {retweet_text}"
-        if len(title) > 200:
-            title = title[:197] + "..."
-        post_id = mblog.get('id', '')
-        link = f"https://m.weibo.cn/detail/{post_id}" if post_id else f"https://m.weibo.cn/u/{uid}"
-        created_at = mblog.get('created_at', '')
-        if created_at:
-            pub_date = parse_weibo_datetime(created_at)
-            if not is_recent(pub_date):
-                continue
-        else:
-            pub_date = datetime.now().strftime('%Y-%m-%d %H:%M')
-        news.append({'title': title, 'link': link, 'pub_date': pub_date, 'source': f'微博: {name}'})
-        if len(news) >= limit:
-            break
-    return news
-
-def fetch_weibo_posts(uid, name, limit=15):
-    """主函数：依次尝试三种策略"""
-    print(f"  [微博] 抓取: {name} (UID: {uid})")
-    
-    # 策略1: 页面内嵌数据
-    result = fetch_weibo_via_render_data(uid, name, limit)
-    if result is not None:
-        print(f"  [OK] {name}: 策略1成功，获取 {len(result)} 条")
-        return result
-    
-    # 策略2: API 调用
-    result = fetch_weibo_via_api(uid, name, limit)
-    if result is not None:
-        print(f"  [OK] {name}: 策略2成功，获取 {len(result)} 条")
-        return result
-    
-    # 策略3: RSSHub
-    result = fetch_weibo_via_rss(uid, name, limit)
-    if result is not None:
-        print(f"  [OK] {name}: 策略3成功，获取 {len(result)} 条")
-        return result
-    
-    print(f"  [错误] {name}: 所有策略均失败")
-    return []
-
-def fetch_weibo_news():
+# ==================== 微博抓取（使用 crawl4weibo）====================
+def fetch_weibo_news() -> List[Dict]:
+    """
+    使用 crawl4weibo 库获取微博用户动态
+    该库内部处理了反爬、签名等问题，无需手动管理 Cookie
+    """
     all_news = []
-    print(f"[INFO] 开始抓取 {len(WEIBO_USERS)} 个微博用户 (多重策略)")
-    for user in WEIBO_USERS:
-        posts = fetch_weibo_posts(user['uid'], user['name'], 15)
-        all_news.extend(posts)
-        time.sleep(2)
+    if not WEIBO_USERS:
+        return all_news
+
+    print(f"[INFO] 开始使用 crawl4weibo 抓取 {len(WEIBO_USERS)} 个微博用户")
+    try:
+        client = WeiboClient()
+        for user in WEIBO_USERS:
+            uid = user['uid']
+            name = user['name']
+            print(f"  [微博] 抓取: {name} (UID: {uid})")
+            try:
+                # 获取用户发布的微博（第一页，展开长微博）
+                posts = client.get_user_posts(uid, page=1, expand=True)
+                if not posts:
+                    print(f"    [警告] 未获取到微博")
+                    continue
+                
+                count = 0
+                for post in posts:
+                    # 时间过滤（只保留 3 天内）
+                    created_at = post.created_at  # 可能是字符串或 datetime 对象
+                    if isinstance(created_at, str):
+                        try:
+                            # 尝试解析常见格式
+                            dt = datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
+                        except:
+                            # 如果解析失败，使用 parse_weibo_datetime 备用
+                            dt_str = parse_weibo_datetime(created_at)
+                            try:
+                                dt = datetime.strptime(dt_str, '%Y-%m-%d %H:%M')
+                            except:
+                                dt = datetime.now() - timedelta(days=10)  # 旧内容
+                    else:
+                        dt = created_at
+                    
+                    if dt < DATE_THRESHOLD:
+                        continue
+                    
+                    # 提取文本
+                    text = post.text.strip()
+                    if not text:
+                        continue
+                    # 移除 HTML 标签（可能还有）
+                    text = re.sub('<[^<]+?>', '', text)
+                    if len(text) > 200:
+                        text = text[:197] + "..."
+                    
+                    # 链接
+                    post_id = post.id
+                    link = f"https://m.weibo.cn/detail/{post_id}"
+                    pub_date = dt.strftime('%Y-%m-%d %H:%M') if not isinstance(created_at, str) else parse_weibo_datetime(created_at)
+                    
+                    all_news.append({
+                        'title': text,
+                        'link': link,
+                        'pub_date': pub_date,
+                        'source': f'微博: {name}'
+                    })
+                    count += 1
+                    if count >= 15:
+                        break
+                print(f"  [OK] {name}: 获取到 {count} 条最近动态")
+                time.sleep(1)  # 礼貌间隔
+            except Exception as e:
+                print(f"  [错误] {name} 抓取失败: {e}")
+                traceback.print_exc()
+    except Exception as e:
+        print(f"  [错误] 初始化 WeiboClient 失败: {e}")
+        traceback.print_exc()
+    
     print(f"  [OK] 微博: 共 {len(all_news)} 条")
     return all_news
 
@@ -528,7 +427,7 @@ def send_email(html_body, recipients):
 # ==================== 主函数 ====================
 def main():
     print("=" * 50)
-    print("VTuber News Fetcher (近3天新闻) - 多重策略版")
+    print("VTuber News Fetcher (近3天新闻) - crawl4weibo 微博版")
     print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"过滤器: 只收录 {DATE_THRESHOLD.strftime('%Y-%m-%d')} 之后的新闻")
     print("=" * 50)

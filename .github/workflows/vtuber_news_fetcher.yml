@@ -26,7 +26,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests feedparser beautifulsoup4
+          pip install requests feedparser beautifulsoup4 crawl4weibo
           echo "✅ 依赖安装完成"
 
       - name: Fetch VTuber News
