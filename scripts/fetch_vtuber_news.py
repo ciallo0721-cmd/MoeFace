@@ -228,7 +228,6 @@ def fetch_weibo_news() -> List[Dict]:
     if not WEIBO_USERS:
         return all_news
 
-    # 移除 cookie=cookie_str 参数
     cookie_str = os.getenv('WEIBO_COOKIE', '')
     if not cookie_str:
         print("[警告] 未设置 WEIBO_COOKIE 环境变量，将尝试无 Cookie 抓取")
@@ -237,7 +236,6 @@ def fetch_weibo_news() -> List[Dict]:
 
     print(f"[INFO] 开始使用 crawl4weibo 抓取 {len(WEIBO_USERS)} 个微博用户")
     try:
-        # 直接初始化，库内部会自动从环境变量中寻找 WEIBO_COOKIE[reference:0]
         client = WeiboClient()
         for user in WEIBO_USERS:
             uid = user['uid']
@@ -251,15 +249,29 @@ def fetch_weibo_news() -> List[Dict]:
 
                 count = 0
                 for post in posts:
-                    # 时间处理
+                    # 安全处理时间
                     created_at = post.created_at
+                    dt = None
                     if isinstance(created_at, str):
                         try:
+                            # 尝试常见格式
                             dt = datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
                         except:
-                            continue
-                    else:
+                            # 尝试其他格式
+                            try:
+                                dt = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+                            except:
+                                try:
+                                    dt = datetime.strptime(created_at, '%Y-%m-%d')
+                                except:
+                                    pass
+                    elif isinstance(created_at, datetime):
                         dt = created_at
+                    
+                    if dt is None:
+                        # 无法解析时间，跳过
+                        continue
+                    
                     if dt < DATE_THRESHOLD:
                         continue
 
