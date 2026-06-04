@@ -270,6 +270,15 @@ python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuil
 
 
 
+## AI <a name="AI"></a>
+*本项目的一些功能/bug的修复使用了**AI**进行辅助开发*，例如：
+- 爬虫.py 所有代码
+- image_cleaner.py 递归模式 / 删除图片 / 排序
+- recognize.py 中的部分功能实现（如特征库管理、视频处理流程优化等）
+- ./docs/moeface.html 所有代码
+
+
+
 
 ## SEO
 
