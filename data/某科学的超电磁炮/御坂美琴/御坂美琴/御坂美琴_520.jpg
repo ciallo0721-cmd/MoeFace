@@ -1,0 +1,45 @@
+
+<a id="a-link"></a>
+<script charset="utf-8" src="https://g.alicdn.com/mtb/lib-windvane/3.0.6/windvane.js" crossorigin></script>
+<script>
+  localStorage.x5referer = window.location.href;
+  var link = document.getElementById("a-link");
+  var isMobile = navigator.userAgent.match(/.*(iPhone|iPad|Android|ios|SymbianOS|Windows Phone).*/i);
+  var isHarmony = navigator.userAgent.match(/ArkWeb/i);
+  var host = (isMobile || isHarmony) ? "https://login.m.taobao.com/login.htm?from=sm&ttid=h5@iframe&redirectURL=" : "https://login.taobao.com/member/login.jhtml?redirectURL=";
+  try {
+	var hostValue = window.location.host;
+	var parts = hostValue && hostValue.split('.');
+	var exp = new Date();
+	var maxAge = -100;
+	exp.setTime(exp.getTime() + maxAge);
+	var cookie = 'x5secdata=;maxAge=' + maxAge + ';expires=' + exp.toUTCString() + ';path=/;domain=.' + parts.slice(-2).join('.') + ';';
+	document.cookie = cookie;
+	document.cookie = cookie + 'Secure;SameSite=None';
+  } catch(e) {}
+  var jump = "https%3a%2f%2fitem.taobao.com:443/wow/z/app/tbpc/pc-detail-ssr-2025/home%2F_____tmd_____%2Fpage%2Flogin_jump%3Frand%3DS3WxGHAgAt756EpznwfNzJq2AFA2qBNla3j6EINUS8We9dazM_iKElp8DwVSHZUevpC41Bx7RzivXIj9RnZgdg%26_lgt_%3D676b11b5a56d2838a76e15f1b3dafe72___343980___0ec34bdc959e2205c7e910773d8ea03e___eaebc79cac1eb5d2f7d8b4595e00ec73344a42d5a0b8cf56539c823cd24ac06cf42c5e6b9d1da8d8130e201f9849b0997f0418a4de098dea749dafdfe0e6966472320b3927478d0faa500490975ba6d403e8e8ce287a5edcff689a7c95f43f619c6d536cfe8c62332c022d3bda061abe118969ca3aeb6e1971ce584a9d982be9ec124ba4ef32bb2b4938b3a33bab981723e4168b1e3193a2ba30fde17790e4190e9894bec1dee02be6c37439eaeaaf281cfee49449e900ac1c8f7acc2cdacde35829692f524e8aa836c9753b193cf7defd035ed85718cba868e8ba1a74ab6ecc4f577549a96e3db10daaf43b1b7c335af42c5e6b9d1da8d8130e201f9849b0997f0418a4de098dea749dafdfe0e6966472320b3927478d0faa500490975ba6d4ddb2b6c69588eb317386a772a14546df4de603b43929f1e19c0732370e8abe99d815335da42d7fb161fd014b686b43d4%26uuid%3D676b11b5a56d2838a76e15f1b3dafe72";
+  link.href = host + jump;
+  if (window.themis && window.WindVane && !isHarmony) {
+    window.WindVane.call('aluWVJSBridge', 'sdkLogin', {}, function(e) {
+  		window.addEventListener('pageshow', function(event) {
+        	if (event.persisted) {
+  				localStorage.x5referer = "";
+          		window.location.reload();
+        	}
+        });
+  		window.location.href = decodeURIComponent(jump);
+  	}, function(e) {
+  		console.log(e);
+  		window.location.reload();
+  	});
+  } else {
+  	link.click();
+  }
+ window._config_ = {
+   "action": "login",
+   "url": "https://login.taobao.com/member/login.jhtml?style=mini&newMini2=true&from=sm&full_redirect=false&redirectURL=https%3a%2f%2fitem.taobao.com:443/wow/z/app/tbpc/pc-detail-ssr-2025/home%2F_____tmd_____%2Fpage%2Fclose_iframe_page%3Frand%3DS3WxGHAgAt756EpznwfNzJq2AFA2qBNla3j6EINUS8We9dazM_iKElp8DwVSHZUevpC41Bx7RzivXIj9RnZgdg%26uuid%3D676b11b5a56d2838a76e15f1b3dafe72%26_lgt_%3D676b11b5a56d2838a76e15f1b3dafe72___343980___0ec34bdc959e2205c7e910773d8ea03e___eaebc79cac1eb5d2f7d8b4595e00ec73344a42d5a0b8cf56539c823cd24ac06cf42c5e6b9d1da8d8130e201f9849b0997f0418a4de098dea749dafdfe0e6966472320b3927478d0faa500490975ba6d403e8e8ce287a5edcff689a7c95f43f619c6d536cfe8c62332c022d3bda061abe118969ca3aeb6e1971ce584a9d982be9ec124ba4ef32bb2b4938b3a33bab981723e4168b1e3193a2ba30fde17790e4190e9894bec1dee02be6c37439eaeaaf281cfee49449e900ac1c8f7acc2cdacde35829692f524e8aa836c9753b193cf7defd035ed85718cba868e8ba1a74ab6ecc4f577549a96e3db10daaf43b1b7c335af42c5e6b9d1da8d8130e201f9849b0997f0418a4de098dea749dafdfe0e6966472320b3927478d0faa500490975ba6d4ddb2b6c69588eb317386a772a14546df4de603b43929f1e19c0732370e8abe99d815335da42d7fb161fd014b686b43d4",
+   "h5url": "https://login.m.taobao.com/login.htm?from=sm&ttid=h5@iframe&redirectURL=https%3a%2f%2fitem.taobao.com:443/wow/z/app/tbpc/pc-detail-ssr-2025/home%2F_____tmd_____%2Fpage%2Fclose_iframe_page%3Frand%3DS3WxGHAgAt756EpznwfNzJq2AFA2qBNla3j6EINUS8We9dazM_iKElp8DwVSHZUevpC41Bx7RzivXIj9RnZgdg%26uuid%3D676b11b5a56d2838a76e15f1b3dafe72%26_lgt_%3D676b11b5a56d2838a76e15f1b3dafe72___343980___0ec34bdc959e2205c7e910773d8ea03e___eaebc79cac1eb5d2f7d8b4595e00ec73344a42d5a0b8cf56539c823cd24ac06cf42c5e6b9d1da8d8130e201f9849b0997f0418a4de098dea749dafdfe0e6966472320b3927478d0faa500490975ba6d403e8e8ce287a5edcff689a7c95f43f619c6d536cfe8c62332c022d3bda061abe118969ca3aeb6e1971ce584a9d982be9ec124ba4ef32bb2b4938b3a33bab981723e4168b1e3193a2ba30fde17790e4190e9894bec1dee02be6c37439eaeaaf281cfee49449e900ac1c8f7acc2cdacde35829692f524e8aa836c9753b193cf7defd035ed85718cba868e8ba1a74ab6ecc4f577549a96e3db10daaf43b1b7c335af42c5e6b9d1da8d8130e201f9849b0997f0418a4de098dea749dafdfe0e6966472320b3927478d0faa500490975ba6d4ddb2b6c69588eb317386a772a14546df4de603b43929f1e19c0732370e8abe99d815335da42d7fb161fd014b686b43d4",
+   "dialogSize": {"width": "", "height": ""}
+};
+</script>
+<!--rgv587_flag:sm-->
