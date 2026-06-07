@@ -632,7 +632,7 @@
         async function loadDatabase() {
             log('正在加载动漫角色特征库...');
             try {
-                const response = await fetch('features/全部特征库.json');
+                const response = await fetch('../features/全部特征库.json');
                 if (!response.ok) throw new Error(`HTTP ${response.status} - 请确保 features/全部特征库.json 存在`);
                 database = await response.json();
                 const charNames = Object.keys(database);
