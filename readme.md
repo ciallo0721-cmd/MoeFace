@@ -1,8 +1,8 @@
 # MoeFace - 动漫人脸识别系统
 
-> 🌸 基于 FaceNet + LBP 动漫人脸检测的角色识别工具，支持图片/视频识别、GUI 拖拽操作、角色特征库自动构建。
+> 🌸 基于 FaceNet + LBP 动漫人脸检测的角色识别工具，支持图片/视频识别、**Web 浏览器界面（主推荐）**、Tkinter GUI（备用）、命令行（备用），以及角色特征库自动构建。
 >
-> **示例效果**：将含有动漫角色的视频/图片拖入窗口，系统自动框出人脸并标注角色名 + 相似度分数。详见下方 [Bug 截图示例](#注意事项)（含误识别说明）。
+> **示例效果**：将含有动漫角色的视频/图片拖入 Web 页面，系统自动框出人脸并标注角色名 + 相似度分数。详见下方 [Bug 截图示例](#注意事项)（含误识别说明）。
 
 ---
 
@@ -33,10 +33,12 @@ MoeFace/
 ├── demo/               # 示例图片
 ├── 视频示例/           # 示例视频文件
 │   └── taffy.mp4       # 示例视频
+├── templates/          # Web 前端页面（Flask）
+│   └── index.html      # 主界面
 ├── lbpcascade_animeface.xml  # 动漫人脸检测分类器
 ├── simhei.ttf          # 中文字体文件
 ├── 爬虫.py             # 角色图片爬取工具
-├── recognize.py        # 核心识别程序
+├── recognize.py        # 核心识别程序（内置 Web / GUI / CLI）
 ├── requirements.txt    # 依赖包列表
 ├── LICENSE             # 许可证文件
 └── readme.md           # 使用说明
@@ -78,7 +80,8 @@ requirements.txt 包含以下核心依赖：
 - pillow
 - requests
 - beautifulsoup4
-- tkinterdnd2（拖拽支持，**必须安装**，否则拖拽功能不可用）
+- **flask（Web 服务，必须）**
+- tkinterdnd2（Tkinter 拖拽支持，**仅 `--mode gui` 需要**）
 - moviepy（可选，用于保留视频音频）
 
 ### 2. 准备分类器文件
@@ -104,52 +107,87 @@ python 爬虫.py
 - 内置了部分角色的关键词配置（可在代码中修改）
 - 自动跳过已存在的图片，避免重复
 
-### 二、人脸识别
+### 二、人脸识别（Web 浏览器界面）【推荐】
 
-#### 1. 列出可用的特征库
+**默认模式** — 无需任何参数，直接在浏览器中使用：
+
+```bash
+python recognize.py
+```
+
+启动后会自动打开浏览器，显示 Web 操作界面：
+- **拖拽图片/视频**到中央区域，或点击「打开图片/视频」按钮
+- **左侧面板**选择特征库、调整识别参数
+- **实时预览**识别结果和运行日志
+
+#### Web 参数说明
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--host` | Web 监听地址 | 127.0.0.1 |
+| `--port` / `-p` | Web 端口 | 5000 |
+
+示例（局域网访问）：
+```bash
+python recognize.py --host 0.0.0.0 --port 8080
+```
+
+---
+
+### 三、人脸识别（Tkinter 桌面 GUI / 命令行）【备用】
+
+> GUI 和 CLI 作为备用手段，需要显式指定 `--mode` 参数：
+> - `--mode gui` → Tkinter 桌面窗口 （拖拽识别）
+> - `--mode cli` → 终端命令行模式
+
+#### 3.1 列出可用的特征库
 ```bash
 python recognize.py --list
 ```
 查看所有可识别的角色和关键词映射关系
 
-#### 2. 处理视频文件
+#### 3.2 处理视频文件（需指定 --mode cli）
 ```bash
 # 基本用法
-python recognize.py --source 视频示例/taffy.mp4 --output output.mp4
+python recognize.py --mode cli --source 视频示例/taffy.mp4 --output output.mp4
 
 # 自定义阈值和跳帧（提升速度）
-python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --threshold 0.45 --skip_frames 2
+python recognize.py --mode cli --source 视频示例/taffy.mp4 --output output.mp4 --threshold 0.45 --skip_frames 2
 
 # 指定特征库
-python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --db_name 永雏塔菲
+python recognize.py --mode cli --source 视频示例/taffy.mp4 --output output.mp4 --db_name 永雏塔菲
 ```
 
-#### 3. 摄像头实时识别
+#### 3.3 摄像头实时识别
 ```bash
 # 仅显示识别结果（无保存）
-python recognize.py --camera --source 0
+python recognize.py --mode cli --camera --source 0
 
 # 保存摄像头识别结果
-python recognize.py --camera --source 0 --output camera_output.mp4
+python recognize.py --mode cli --camera --source 0 --output camera_output.mp4
 ```
 
-#### 4. 强制重建特征库
+#### 3.4 强制重建特征库
 ```bash
-python recognize.py --source 视频示例/taffy.mp4 --output output.mp4 --rebuild
+python recognize.py --mode cli --source 视频示例/taffy.mp4 --output output.mp4 --rebuild
 ```
 
-### 三、参数说明
+### 四、参数说明
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| --data | 特征库图片文件夹路径 | ./data |
-| --source | 视频文件路径或摄像头ID | 无 |
-| --camera | 使用摄像头模式 | False |
-| --output | 输出视频路径 | 无 |
-| --threshold | 识别阈值（相似度） | 0.45 |
-| --skip_frames | 跳帧数（越大越快） | 1 |
-| --rebuild | 强制重新构建特征库 | False |
-| --db_name | 指定特征库名称 | 自动识别 |
-| --list | 列出可用特征库 | False |
+| `--mode` / `-m` | 运行模式: `web`（浏览器）/ `gui`（桌面）/ `cli`（终端） | web |
+| `--host` | Web 监听地址（仅 web 模式） | 127.0.0.1 |
+| `--port` / `-p` | Web 端口（仅 web 模式） | 5000 |
+| `--data` | 特征库图片文件夹路径 | ./data |
+| `--source` / `-s` | 视频文件路径或摄像头ID（仅 cli 模式） | 无 |
+| `--camera` / `-c` | 使用摄像头模式（仅 cli 模式） | False |
+| `--output` / `-o` | 输出视频路径 | 无 |
+| `--threshold` / `-t` | 识别阈值（相似度） | 0.45 |
+| `--skip_frames` / `-k` | 跳帧数（越大越快） | 1 |
+| `--min-neighbors` | 人脸检测灵敏度 | 3 |
+| `--rebuild` / `-r` | 强制重新构建特征库 | False |
+| `--db-name` | 指定特征库名称 | 自动识别 |
+| `--list` / `-l` | 列出可用特征库 | False |
+| `--body` | 启用人体姿态检测 | False |
 
 ## 关键词映射 <a name="关键词映射"></a>
 系统通过 `cname/name.json` 管理关键词映射（**已从代码中独立出来，无需修改 Python 文件**），例如：

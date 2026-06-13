@@ -6,6 +6,7 @@ numpy>=1.21.0
 pillow>=8.0.0
 requests>=2.25.0
 beautifulsoup4>=4.9.0
+flask>=2.0.0
 tkinterdnd2>=0.3.0
 moviepy>=1.0.3
 mediapipe>=0.10.0

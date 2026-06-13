@@ -8,7 +8,11 @@
 
 ## 核心文件
 
-- `recognize.py` — 主程序（2026-04-04 已改造为 Tkinter GUI），模型懒加载，支持拖拽识别图片/视频
+- `recognize.py` — 主程序，内置三种运行模式：
+  - **Web 模式（默认）**: `python recognize.py` → Flask Web 服务，浏览器操作
+  - **GUI 模式**: `python recognize.py --mode gui` → Tkinter 桌面窗口
+  - **CLI 模式**: `python recognize.py --mode cli` → 终端命令行
+- `templates/index.html` — Web 前端页面（Flask 渲染）
 - `cname/name.json` — 角色别名配置（模块化，JSON 格式），取代原 KEYWORD_MAPPING 硬编码
 - `data/` — 各角色训练图片（每个角色一个子文件夹）
 - `features/` — JSON 格式特征库缓存
