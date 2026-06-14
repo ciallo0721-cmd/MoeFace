@@ -104,26 +104,129 @@ def get_db_name_from_filename(filename: str) -> str:
     return DEFAULT_DB_NAME
 
 
-# ── JSON 特征库管理 ────────────────────────────────────────────────────────
-def _safe_json_name(name: str) -> str:
+# ── 特征库管理（自研 .moe 格式）───────────────────────────────────────
+def _safe_filename(name: str) -> str:
+    """生成安全的文件名（保留中文、字母、数字、部分符号）"""
     keep = set("._- ·•/")
     return "".join(c for c in name if c.isalnum() or c in keep or "\u4e00" <= c <= "\u9fff")
 
+
+def save_database_to_moe(database: dict, db_name: str):
+    """
+    保存特征库为自研 .moe 格式（二进制）
+    格式：
+    - 0x00-0x02: 魔数 "MOE" (3 bytes)
+    - 0x03:      版本号 (1 byte, 当前=1)
+    - 0x04-0x07: 角色数量 (int32, little-endian)
+    - 接着每个角色：
+        - 名称长度 (int32)
+        - 名称 (UTF-8 bytes)
+        - 特征向量 512 个 float32 (2048 bytes)
+    """
+    if not database:
+        return None
+    safe = _safe_filename(db_name)
+    moe_path = FEATURES_DIR / f"{safe}.moe"
+    moe_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    import struct
+    import numpy as np
+    
+    with open(moe_path, "wb") as f:
+        # 魔数 + 版本
+        f.write(b"MOE")          # 3 bytes
+        f.write(bytes([1]))      # 1 byte, version=1
+        
+        # 角色数量
+        f.write(struct.pack("<I", len(database)))  # 4 bytes, uint32
+        
+        for name, emb in database.items():
+            # 角色名
+            name_bytes = name.encode("utf-8")
+            f.write(struct.pack("<I", len(name_bytes)))  # 4 bytes
+            f.write(name_bytes)
+            
+            # 特征向量 (确保是 512 维 float32)
+            if isinstance(emb, np.ndarray):
+                vec = emb.astype(np.float32).tobytes()
+            else:
+                vec = np.array(emb, dtype=np.float32).tobytes()
+            f.write(vec)
+    
+    return moe_path
+
+
+def load_database_from_moe(db_name: str):
+    """
+    从自研 .moe 格式加载特征库
+    """
+    import struct
+    import numpy as np
+    
+    safe = _safe_filename(db_name)
+    moe_path = FEATURES_DIR / f"{safe}.moe"
+    if not moe_path.exists():
+        return None
+    
+    try:
+        with open(moe_path, "rb") as f:
+            # 读取魔数
+            magic = f.read(3)
+            if magic != b"MOE":
+                warnings.warn(f"(｡•́︿•̀｡),主人,文件格式错误（魔数不匹配）: {moe_path}")
+                return None
+            
+            # 读取版本
+            version = ord(f.read(1))
+            if version != 1:
+                warnings.warn(f"(｡•́︿•̀｡),主人,不支持的版本: {version}")
+                return None
+            
+            # 读取角色数量
+            num_persons = struct.unpack("<I", f.read(4))[0]
+            
+            database = {}
+            for _ in range(num_persons):
+                # 读取角色名
+                name_len = struct.unpack("<I", f.read(4))[0]
+                name = f.read(name_len).decode("utf-8")
+                
+                # 读取特征向量 (512 个 float32 = 2048 bytes)
+                vec_bytes = f.read(512 * 4)
+                if len(vec_bytes) != 512 * 4:
+                    warnings.warn(f"(｡•́︿•̀｡),主人,特征向量数据不完整: {name}")
+                    return None
+                emb = np.frombuffer(vec_bytes, dtype=np.float32)
+                database[name] = emb
+            
+            return database
+    
+    except Exception as e:
+        warnings.warn(f"(｡•́︿•̀｡),主人,加载 .moe 特征库失败了: {e}")
+        return None
+
+
+# 保留 JSON 版本作为兼容备份（可选）
 def save_database_to_json(database: dict, json_name: str):
     if not database:
         return None
-    safe = _safe_json_name(json_name)
-    json_path = FEATURES_DIR / f"{safe}.json"
+    safe = _safe_filename(json_name)
+    json_path = FEATURES_DIR / f"{safe}.json.bak"  # 改为 .bak 后缀，不主动使用
     json_path.parent.mkdir(parents=True, exist_ok=True)
     serializable = {n: emb.tolist() for n, emb in database.items()}
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(serializable, f, indent=2, ensure_ascii=False)
     return json_path
 
+
 def load_database_from_json(json_name: str):
+    """仅用于兼容旧版，优先使用 .moe 格式"""
     import numpy as np
-    safe = _safe_json_name(json_name)
+    safe = _safe_filename(json_name)
     json_path = FEATURES_DIR / f"{safe}.json"
+    if not json_path.exists():
+        # 尝试 .bak
+        json_path = FEATURES_DIR / f"{safe}.json.bak"
     if not json_path.exists():
         return None
     try:
@@ -131,7 +234,7 @@ def load_database_from_json(json_name: str):
             raw = json.load(f)
         return {n: np.array(e) for n, e in raw.items()}
     except Exception as e:
-        warnings.warn(f"(｡•́︿•̀｡),主人,加载特征库失败了: {e}")
+        warnings.warn(f"(｡•́︿•̀｡),主人,加载 JSON 特征库失败了: {e}")
         return None
 
 
@@ -362,9 +465,15 @@ def _find_role_path(db_name: str) -> Path:
 def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None) -> Tuple[dict, bool]:
     """获取或构建特征库，返回 (database, built)"""
     if not force_rebuild:
+        # 优先加载 .moe 格式
+        db = load_database_from_moe(db_name)
+        if db is not None:
+            log_fn(f"✅ 从 .moe 缓存加载特征库 [{db_name}]，共 {len(db)} 个角色")
+            return db, False
+        # 兼容旧版：尝试加载 .json
         db = load_database_from_json(db_name)
         if db is not None:
-            log_fn(f"✅ 从缓存加载特征库 [{db_name}]，共 {len(db)} 个角色")
+            log_fn(f"✅ 从 .json 缓存加载特征库 [{db_name}]，共 {len(db)} 个角色（建议转为 .moe 格式）")
             return db, False
 
     if db_name == DEFAULT_DB_NAME:
@@ -381,8 +490,8 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
         db = build_database(db_path, log_fn, progress_fn)
 
     if db:
-        save_database_to_json(db, db_name)
-        log_fn(f"✅ 特征库已缓存喵~，共 {len(db)} 个角色")
+        save_database_to_moe(db, db_name)
+        log_fn(f"✅ 特征库已缓存为 .moe 格式喵~，共 {len(db)} 个角色")
     return db, True
 
 

@@ -280,11 +280,76 @@
     ]
   },
   {
+    "db_name": "火打谷愛衣",
+    "aliases": [
+      "火打谷愛衣",
+      "爱衣",
+      "Mei",
+      "Hiuchidani",
+      "火打谷爱衣"
+    ]
+  },
+  {
+    "db_name": "汐山涼音",
+    "aliases": [
+      "汐山涼音",
+      "涼音",
+      "Suzune",
+      "Seyama",
+      "汐山凉音"
+    ]
+  },
+  {
+    "db_name": "墨染希",
+    "aliases": [
+      "墨染希",
+      "希",
+      "Nozomi",
+      "Sumizome"
+    ]
+  },
+  {
     "db_name": "warma",
     "aliases": [
       "warma",
       "沃玛",
       "Warma"
+    ]
+  },
+  {
+    "db_name": "Inaba_Touko",
+    "aliases": [
+      "因幡憧子",
+      "憧子",
+      "Touko",
+      "Inaba"
+    ]
+  },
+  {
+    "db_name": "Shiiba_Tsumugi",
+    "aliases": [
+      "椎叶紬",
+      "紬",
+      "Tsumugi",
+      "Shiiba"
+    ]
+  },
+  {
+    "db_name": "Shiina_Airu",
+    "aliases": [
+      "椎名爱瑠",
+      "爱瑠",
+      "Airu",
+      "Shiina"
+    ]
+  },
+  {
+    "db_name": "Uduki_Kazana",
+    "aliases": [
+      "卯木和奏",
+      "和奏",
+      "Kazana",
+      "Uduki"
     ]
   }
 ]
