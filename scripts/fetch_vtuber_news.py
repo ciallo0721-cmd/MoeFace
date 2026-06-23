@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# MoeFace 动漫人脸识别项目配套：VTuber 新闻订阅工具
+# 抓取 VTuber / 虚拟主播相关资讯
 
 import os
 import re

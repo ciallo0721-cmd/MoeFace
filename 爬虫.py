@@ -1,3 +1,9 @@
+"""
+爬虫.py — MoeFace 动漫人脸识别项目配套：动漫/VTuber 图片采集工具
+基于 Bing 图片搜索的二次元角色图片爬虫
+用于构建动漫人脸识别、VTuber 识别训练数据集和角色特征库
+"""
+
 import os
 import sys
 import requests

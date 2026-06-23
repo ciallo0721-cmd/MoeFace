@@ -1,5 +1,7 @@
 """
-json_to_moe.py - 将旧版 .json 特征库批量转换为自研 .moe 格式
+json_to_moe.py - 将旧版 .json 特征库批量转换为自研 .moe 二进制格式
+MoeFace 动漫人脸识别项目：角色特征库转换工具
+支持 VTuber/二次元角色特征向量 (.json) → 紧凑 .moe 格式
 用法：python json_to_moe.py
 """
 

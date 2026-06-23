@@ -1,6 +1,8 @@
 """
-MoeFace — 动漫人脸识别系统
-GUI 版本 (Tkinter) + CLI 版本 (终端图形化)
+MoeFace — 动漫人脸识别系统 / VTuber 二次元角色识别工具
+基于 FaceNet + OpenCV 实现动漫人脸检测与特征匹配
+支持 VTuber / 虚拟主播识别，本地运行保护隐私
+GUI 版本 (Tkinter) + CLI 版本 (终端图形化) + Flask Web 服务版
 """
 
 """
