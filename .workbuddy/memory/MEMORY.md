@@ -4,7 +4,8 @@
 
 - **项目名**: MoeFace（EmoScan Pro / MoeFace）
 - **路径**: `G:/EmoScan Pro/MoeFace`
-- **功能**: 动漫人脸识别系统，使用 FaceNet + lbpcascade_animeface，通过 JSON 特征库匹配角色
+- **功能**: 动漫人脸识别系统，使用 FaceNet + lbpcascade_animeface，通过 .moe 特征库匹配角色
+- **.moe 格式**: 自研文本格式，2026-06-23 从二进制重构为 11 部位多部位文本格式
 
 ## 核心文件
 
@@ -15,7 +16,16 @@
 - `templates/index.html` — Web 前端页面（Flask 渲染）
 - `cname/name.json` — 角色别名配置（模块化，JSON 格式），取代原 KEYWORD_MAPPING 硬编码
 - `data/` — 各角色训练图片（每个角色一个子文件夹）
-- `features/` — JSON 格式特征库缓存
+- `features/` — .moe 文本格式特征库缓存
+- `json_to_moe.py` — 旧版 .json → 新版 .moe 转换工具
+
+## .moe 特征库格式（2026-06-23 重构）
+
+- **格式**: `("角色名"{eye:浮点,...:eye2:...:leg2:...:}"角色名2"{...})`
+- **11 个部位键**: eye, eye2, nose, mouth, head（面部，共享 FaceNet 特征）, arm, arm2, hand, hand2, leg, leg2（肢体，从 YOLO-Pose 裁剪后用 FaceNet 提取）
+- **识别算法**: 多部位加权平均余弦相似度（面部权重 1.5，肢体权重 1.0）
+- `:` 同时作为 key:val 分隔符和 pair 间分隔符
+- 旧二进制格式（魔数 "MOE"，单 512-dim 向量）已废弃
 
 ## 别名系统（cname/name.json）规则
 

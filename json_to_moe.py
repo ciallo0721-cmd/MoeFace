@@ -1,20 +1,29 @@
 """
-json_to_moe.py - 将旧版 .json 特征库批量转换为自研 .moe 二进制格式
+json_to_moe.py - 将旧版 .json 特征库批量转换为新 .moe 文本格式
 MoeFace 动漫人脸识别项目：角色特征库转换工具
-支持 VTuber/二次元角色特征向量 (.json) → 紧凑 .moe 格式
+支持 VTuber/二次元角色特征向量 (.json) → 文本 .moe 格式
 用法：python json_to_moe.py
+
+新 .moe 文本格式：
+("角色名"{key1:浮点,浮点,...:key2:浮点,...:keyN:浮点,...:}"角色名2"{...})
+
+每个角色存储 11 个部位特征：
+  面部：eye, eye2, nose, mouth, head
+  肢体：arm, arm2, hand, hand2, leg, leg2
+旧 .json 只有 1 个面部特征，转换时复制到所有 11 个键
 """
 
 import os
 import sys
 import json
-import struct
-import warnings
 from pathlib import Path
 
 import numpy as np
 
 FEATURES_DIR = Path(__file__).resolve().parent / "features"
+
+FEATURE_KEYS = ["eye", "eye2", "nose", "mouth", "head",
+                "arm", "arm2", "hand", "hand2", "leg", "leg2"]
 
 
 def _safe_filename(name: str) -> str:
@@ -24,13 +33,9 @@ def _safe_filename(name: str) -> str:
 
 def json_to_moe(json_path: Path) -> bool:
     """
-    将单个 .json 特征库文件转换为 .moe 格式
-    .moe 格式说明：
-      0x00-0x02  魔数 "MOE" (3 bytes)
-      0x03       版本号 (1 byte, =1)
-      0x04-0x07  角色数量 (uint32, little-endian)
-      接着每个角色：
-        名称长度 (uint32) + 名称 (UTF-8) + 特征向量 (512×float32 = 2048 bytes)
+    将单个 .json 特征库文件转换为 .moe 文本格式
+    旧 .json = {"角色名": [512 个浮点数]}
+    新 .moe = ("角色名"{eye:0.1,0.2,...:eye2:0.1,0.2,...:...leg2:...:})
     """
     try:
         with open(json_path, "r", encoding="utf-8") as f:
@@ -46,24 +51,25 @@ def json_to_moe(json_path: Path) -> bool:
     moe_path = json_path.with_suffix(".moe")
 
     try:
-        with open(moe_path, "wb") as f:
-            # 魔数 + 版本
-            f.write(b"MOE")
-            f.write(bytes([1]))
-            # 角色数量
-            f.write(struct.pack("<I", len(raw)))
-            for name, emb in raw.items():
-                # 角色名
-                name_bytes = name.encode("utf-8")
-                f.write(struct.pack("<I", len(name_bytes)))
-                f.write(name_bytes)
-                # 特征向量
-                vec = np.array(emb, dtype=np.float32)
-                if vec.shape[0] != 512:
-                    print(f"  [WARN]  {name} 特征维度异常: {vec.shape}，跳过")
-                    continue
-                f.write(vec.tobytes())
+        chunks = []
+        for name, emb in raw.items():
+            # 旧 .json 只有 1 个面部特征向量，复制到所有键
+            vec = np.array(emb, dtype=np.float32)
+            if vec.ndim == 0 or vec.shape[0] != 512:
+                print(f"  [WARN]  {name} 特征维度异常: {vec.shape}，跳过")
+                continue
+
+            content_parts = []
+            for key in FEATURE_KEYS:
+                vec_str = ",".join(f"{v:.10f}" for v in vec)
+                content_parts.append(f"{key}:{vec_str}")
+            content = ":".join(content_parts)
+            chunks.append(f'"{name}"{{{content}:}}')
+
+        all_text = "(" + "".join(chunks) + ")"
+        moe_path.write_text(all_text, encoding="utf-8")
         return True
+
     except Exception as e:
         print(f"  [ERROR] 写入 .moe 失败: {moe_path.name} → {e}")
         if moe_path.exists():
@@ -72,22 +78,27 @@ def json_to_moe(json_path: Path) -> bool:
 
 
 def verify_moe(moe_path: Path) -> bool:
-    """验证 .moe 文件是否可正常读取"""
+    """验证 .moe 文本文件是否可正常读取"""
     try:
-        with open(moe_path, "rb") as f:
-            magic = f.read(3)
-            if magic != b"MOE":
+        text = moe_path.read_text(encoding="utf-8").strip()
+        if not text.startswith("(") or not text.endswith(")"):
+            return False
+        inner = text[1:-1]
+        parts = inner.split('"')
+        i = 1
+        while i + 1 < len(parts):
+            name = parts[i]
+            content_block = parts[i + 1]
+            i += 2
+            if not content_block.startswith("{") or not content_block.endswith("}"):
                 return False
-            version = ord(f.read(1))
-            if version != 1:
+            content = content_block[1:-1]
+            if not content:
+                continue
+            # 验证每个键都有值
+            kv_pairs = content.split(":")
+            if len(kv_pairs) < 2:
                 return False
-            num = struct.unpack("<I", f.read(4))[0]
-            for _ in range(num):
-                name_len = struct.unpack("<I", f.read(4))[0]
-                f.read(name_len)
-                vec_bytes = f.read(512 * 4)
-                if len(vec_bytes) != 512 * 4:
-                    return False
         return True
     except Exception:
         return False
@@ -121,7 +132,7 @@ def main():
             size_moe  = moe_path.stat().st_size
             ratio = (1 - size_moe / size_json) * 100 if size_json else 0
             print(f"  [OK]    {json_path.name} → {moe_path.name}")
-            print(f"          体积: {size_json/1024:.1f} KB → {size_moe/1024:.1f} KB  (减少 {ratio:.1f}%)")
+            print(f"          体积: {size_json/1024:.1f} KB → {size_moe/1024:.1f} KB  (变化 {ratio:+.1f}%)")
             ok += 1
         else:
             print(f"  [FAIL]  转换或验证失败: {json_path.name}")

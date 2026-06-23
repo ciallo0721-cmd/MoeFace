@@ -49,6 +49,12 @@ DATA_DIR     = BASE_DIR / "data"
 CNAME_PATH   = RESOURCE_DIR / "cname" / "name.json"
 DEFAULT_DB_NAME = "全部特征库"
 
+# ── 新 .moe 文本格式的部位键名 ──────────────────────────────────────────
+FEATURE_KEYS = ["eye", "eye2", "nose", "mouth", "head",
+                "arm", "arm2", "hand", "hand2", "leg", "leg2"]
+FACE_KEYS = FEATURE_KEYS[:5]    # eye, eye2, nose, mouth, head
+LIMB_KEYS = FEATURE_KEYS[5:]    # arm, arm2, hand, hand2, leg, leg2
+
 FEATURES_DIR.mkdir(exist_ok=True)
 
 # ── 延迟导入重型库（避免 import 时卡死 GUI）───────────────────────────────────
@@ -115,94 +121,96 @@ def _safe_filename(name: str) -> str:
 
 def save_database_to_moe(database: dict, db_name: str):
     """
-    保存特征库为自研 .moe 格式（二进制）
-    格式：
-    - 0x00-0x02: 魔数 "MOE" (3 bytes)
-    - 0x03:      版本号 (1 byte, 当前=1)
-    - 0x04-0x07: 角色数量 (int32, little-endian)
-    - 接着每个角色：
-        - 名称长度 (int32)
-        - 名称 (UTF-8 bytes)
-        - 特征向量 512 个 float32 (2048 bytes)
+    保存特征库为自研 .moe 文本格式
+    格式：("角色名"{key1:val1:key2:val2:...keyN:valN:}"角色名2"{...})
+    其中 val 为逗号分隔的浮点数（特征向量）
     """
     if not database:
         return None
+    import numpy as np
     safe = _safe_filename(db_name)
     moe_path = FEATURES_DIR / f"{safe}.moe"
     moe_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    import struct
-    import numpy as np
-    
-    with open(moe_path, "wb") as f:
-        # 魔数 + 版本
-        f.write(b"MOE")          # 3 bytes
-        f.write(bytes([1]))      # 1 byte, version=1
-        
-        # 角色数量
-        f.write(struct.pack("<I", len(database)))  # 4 bytes, uint32
-        
-        for name, emb in database.items():
-            # 角色名
-            name_bytes = name.encode("utf-8")
-            f.write(struct.pack("<I", len(name_bytes)))  # 4 bytes
-            f.write(name_bytes)
-            
-            # 特征向量 (确保是 512 维 float32)
-            if isinstance(emb, np.ndarray):
-                vec = emb.astype(np.float32).tobytes()
-            else:
-                vec = np.array(emb, dtype=np.float32).tobytes()
-            f.write(vec)
-    
+
+    chunks = []
+    for name, parts in database.items():
+        content_parts = []
+        for key in FEATURE_KEYS:
+            if key in parts and isinstance(parts[key], np.ndarray):
+                vec_str = ",".join(f"{v:.10f}" for v in parts[key])
+                content_parts.append(f"{key}:{vec_str}")
+        content = ":".join(content_parts)
+        # 加 trailing colon 以匹配格式规范
+        chunks.append(f'"{name}"{{{content}:}}')
+
+    all_text = "(" + "".join(chunks) + ")"
+    moe_path.write_text(all_text, encoding="utf-8")
     return moe_path
 
 
 def load_database_from_moe(db_name: str):
     """
-    从自研 .moe 格式加载特征库
+    从自研 .moe 文本格式加载特征库
+    格式：("角色名"{key1:val1:key2:val2:...}"角色名2"{...})
     """
-    import struct
     import numpy as np
-    
+
     safe = _safe_filename(db_name)
     moe_path = FEATURES_DIR / f"{safe}.moe"
     if not moe_path.exists():
         return None
-    
+
     try:
-        with open(moe_path, "rb") as f:
-            # 读取魔数
-            magic = f.read(3)
-            if magic != b"MOE":
-                warnings.warn(f"(｡•́︿•̀｡),主人,文件格式错误（魔数不匹配）: {moe_path}")
-                return None
-            
-            # 读取版本
-            version = ord(f.read(1))
-            if version != 1:
-                warnings.warn(f"(｡•́︿•̀｡),主人,不支持的版本: {version}")
-                return None
-            
-            # 读取角色数量
-            num_persons = struct.unpack("<I", f.read(4))[0]
-            
-            database = {}
-            for _ in range(num_persons):
-                # 读取角色名
-                name_len = struct.unpack("<I", f.read(4))[0]
-                name = f.read(name_len).decode("utf-8")
-                
-                # 读取特征向量 (512 个 float32 = 2048 bytes)
-                vec_bytes = f.read(512 * 4)
-                if len(vec_bytes) != 512 * 4:
-                    warnings.warn(f"(｡•́︿•̀｡),主人,特征向量数据不完整: {name}")
-                    return None
-                emb = np.frombuffer(vec_bytes, dtype=np.float32)
-                database[name] = emb
-            
-            return database
-    
+        text = moe_path.read_text(encoding="utf-8").strip()
+        if not text.startswith("(") or not text.endswith(")"):
+            warnings.warn(f"(｡•́︿•̀｡),主人,.moe 文件格式错误（缺少外层括号）: {moe_path}")
+            return None
+
+        inner = text[1:-1]  # 去掉外层 ()
+        database = {}
+
+        # 按 " 分割提取每个角色条目
+        # 格式： "Name1"{...}"Name2"{...}
+        # 分割后: ["", "Name1", "{content}", "Name2", "{content}", ""]
+        parts = inner.split('"')
+        i = 1
+        while i + 1 < len(parts):
+            name = parts[i]
+            content_block = parts[i + 1]
+            i += 2
+
+            if not content_block.startswith("{") or not content_block.endswith("}"):
+                continue
+
+            content = content_block[1:-1]  # 去掉 {}
+            if not content:
+                continue
+
+            # 去掉结尾可能的 :
+            if content.endswith(":"):
+                content = content[:-1]
+
+            # 解析 key:val:key:val:...
+            kv_parts = content.split(":")
+            parts_dict = {}
+            for j in range(0, len(kv_parts), 2):
+                if j + 1 >= len(kv_parts):
+                    break
+                key = kv_parts[j]
+                val_str = kv_parts[j + 1]
+                if not val_str or val_str == "placeholder":
+                    continue
+                try:
+                    vals = [float(x) for x in val_str.split(",")]
+                    parts_dict[key] = np.array(vals, dtype=np.float32)
+                except ValueError:
+                    continue
+
+            if parts_dict:
+                database[name] = parts_dict
+
+        return database
+
     except Exception as e:
         warnings.warn(f"(｡•́︿•̀｡),主人,加载 .moe 特征库失败了: {e}")
         return None
@@ -222,7 +230,7 @@ def save_database_to_json(database: dict, json_name: str):
 
 
 def load_database_from_json(json_name: str):
-    """仅用于兼容旧版，优先使用 .moe 格式"""
+    """仅用于兼容旧版，转换为新 .moe 多部位格式"""
     import numpy as np
     safe = _safe_filename(json_name)
     json_path = FEATURES_DIR / f"{safe}.json"
@@ -234,7 +242,15 @@ def load_database_from_json(json_name: str):
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        return {n: np.array(e) for n, e in raw.items()}
+        # 旧格式 {n: [512 float]} → 新格式 {n: {key: emb}}
+        database = {}
+        for n, e in raw.items():
+            vec = np.array(e, dtype=np.float32)
+            parts = {}
+            for key in FEATURE_KEYS:
+                parts[key] = vec.copy()
+            database[n] = parts
+        return database
     except Exception as e:
         warnings.warn(f"(｡•́︿•̀｡),主人,加载 JSON 特征库失败了: {e}")
         return None
@@ -342,14 +358,163 @@ def extract_features_from_image(image_path: str, log_fn=print):
     return emb
 
 
+# ── 多部位特征提取 ─────────────────────────────────────────────────────
+def _extract_face_embedding(face_rgb_img):
+    """从 RGB 人脸图像提取 FaceNet 512维嵌入"""
+    import cv2, torch
+    face = cv2.resize(face_rgb_img, (160, 160))
+    tensor = (torch.tensor(face).permute(2, 0, 1)
+              .float().unsqueeze(0).to(_device) / 255.0)
+    with torch.no_grad():
+        return _resnet(tensor).cpu().numpy().flatten()
+
+
+def _extract_limb_embeddings(full_img_bgr, body_persons):
+    """
+    从全身图像 + YOLO-Pose 检测结果提取肢体特征
+    返回 dict: {key: 512-dim embedding}
+    若无可用的肢体检测结果，返回空 dict
+    """
+    import cv2
+    import numpy as np
+
+    LIMB_KP_MAP = {
+        "arm":  (5, 7),    # left_shoulder → left_elbow
+        "arm2": (6, 8),    # right_shoulder → right_elbow
+        "hand": (9,),      # left_wrist
+        "hand2": (10,),    # right_wrist
+        "leg":  (11, 13),  # left_hip → left_knee
+        "leg2": (12, 14),  # right_hip → right_knee
+    }
+
+    if not body_persons:
+        return {}
+
+    h, w = full_img_bgr.shape[:2]
+    results = {}
+    # 使用检测到的第一个人体
+    _, _, _, _, kps = body_persons[0]
+    MAX_KPS = 17
+
+    for key, kp_indices in LIMB_KP_MAP.items():
+        points = []
+        for idx in kp_indices:
+            if idx < len(kps) and kps[idx][2] > 0.5:
+                px = int(kps[idx][0] * w)
+                py = int(kps[idx][1] * h)
+                points.append((px, py))
+
+        if not points:
+            continue
+
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        cx, cy = sum(xs) // len(xs), sum(ys) // len(ys)
+
+        # 单点（如 hand）用固定矩形, 两点用连线矩形+边距
+        MARGIN = 50
+        if len(points) == 1:
+            x1 = max(0, cx - MARGIN)
+            y1 = max(0, cy - MARGIN)
+            x2 = min(w, cx + MARGIN)
+            y2 = min(h, cy + MARGIN)
+        else:
+            x1 = max(0, min(xs) - 15)
+            y1 = max(0, min(ys) - 15)
+            x2 = min(w, max(xs) + 15)
+            y2 = min(h, max(ys) + 15)
+
+        if (x2 - x1) < 30 or (y2 - y1) < 30:
+            continue
+
+        region = full_img_bgr[y1:y2, x1:x2]
+        if region.size == 0:
+            continue
+
+        region_rgb = cv2.cvtColor(region, cv2.COLOR_BGR2RGB)
+        try:
+            emb = _extract_face_embedding(region_rgb)
+            results[key] = emb
+        except Exception:
+            continue
+
+    return results
+
+
+def extract_multi_features_from_image(image_path: str, log_fn=print):
+    """
+    从图片提取全部 11 个部位特征（面部 5 + 肢体 6）
+    返回 dict: {key: 512-dim embedding} 或 None(完全失败)
+    """
+    import cv2, torch
+    import numpy as np
+
+    if not _ensure_models(log_fn):
+        log_fn("❌ 模型未就绪，无法提取特征")
+        return None
+
+    cascade = _get_thread_cascade()
+    try:
+        with open(image_path, "rb") as f:
+            data = np.frombuffer(f.read(), dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is None:
+            log_fn(f"⚠️ 无法解码图片: {image_path}")
+            return None
+    except Exception as e:
+        log_fn(f"⚠️ 读取图片失败 {image_path}: {e}")
+        return None
+
+    # 缩放超大图
+    MAX_DIM = 4096
+    h, w = img.shape[:2]
+    if max(h, w) > MAX_DIM:
+        scale = MAX_DIM / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)),
+                         interpolation=cv2.INTER_AREA)
+
+    results = {}
+
+    # ── 1. 面部特征 ──
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = cascade.detectMultiScale(
+        gray, scaleFactor=1.02, minNeighbors=3,
+        minSize=(20, 20), maxSize=(800, 800)
+    )
+    face_emb = None
+    if len(faces) > 0:
+        faces = sorted(faces, key=lambda r: r[2] * r[3], reverse=True)
+        x, y, fw, fh = faces[0]
+        face = img[y:y+fh, x:x+fw]
+        if face.size > 0:
+            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+            try:
+                face_emb = _extract_face_embedding(face_rgb)
+                # 面部 5 个键共享同一个面部分数
+                for key in FACE_KEYS:
+                    results[key] = face_emb.copy()
+            except Exception as e:
+                log_fn(f"⚠️ 面部特征提取失败: {e}")
+
+    # ── 2. 肢体特征 ──
+    try:
+        persons = detect_body_pose(img, lambda m: None)
+        if persons:
+            limb_embs = _extract_limb_embeddings(img, persons)
+            results.update(limb_embs)
+    except Exception:
+        pass
+
+    return results if results else None
+
+
 def build_database(data_root: Path, log_fn=print, progress_fn=None):
-    """构建特征库，确保模型已加载"""
+    """构建多部位特征库——每个角色存储 11 个部位的平均特征向量"""
     if not _ensure_models(log_fn):
         log_fn("❌ 模型加载失败，无法构建特征库")
         return {}
 
     import numpy as np
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     import time
 
     database = {}
@@ -395,9 +560,9 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
             person_images[data_root.name] = imgs[:MAX_PER_PERSON]
             total_images = min(len(imgs), MAX_PER_PERSON)
 
-    log_fn(f"多角色模式，共 {len(person_images)} 个角色，{total_images} 张图片")
+    log_fn(f"多角色模式，共 {len(person_images)} 个角色，{total_images} 张图片，"
+           f"每角色 {len(FEATURE_KEYS)} 个部位特征")
 
-    max_workers = 1
     start_time = time.time()
     processed = [0]
 
@@ -410,11 +575,15 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
         if progress_fn:
             progress_fn(processed[0], total_images, time.time() - start_time, person_name)
 
-        all_embs = []
+        # 按部位键名收集特征向量
+        collected = {key: [] for key in FEATURE_KEYS}
+
         for i, p in enumerate(imgs):
-            e = extract_features_from_image(str(p), log_fn)
-            if e is not None:
-                all_embs.append(e)
+            all_feats = extract_multi_features_from_image(str(p), log_fn)
+            if all_feats:
+                for key in FEATURE_KEYS:
+                    if key in all_feats and all_feats[key] is not None:
+                        collected[key].append(all_feats[key])
             processed[0] += 1
 
             if progress_fn and (i + 1) % 5 == 0:
@@ -422,18 +591,28 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
 
         gc.collect()
 
-        if all_embs:
-            return (person_name, np.mean(all_embs, axis=0))
+        # 每个部位分别取平均
+        result = {}
+        has_any = False
+        for key in FEATURE_KEYS:
+            if collected[key]:
+                result[key] = np.mean(collected[key], axis=0).astype(np.float32)
+                has_any = True
+
+        if has_any:
+            return (person_name, result)
         return None
 
     for person_name in person_images.keys():
         result = _process_person(person_name)
         if result is not None:
-            name, avg = result
-            database[name] = avg
-            log_fn(f"  ✅ {name} 完成")
+            name, parts = result
+            database[name] = parts
+            face_count = sum(1 for k in FACE_KEYS if k in parts)
+            limb_count = sum(1 for k in LIMB_KEYS if k in parts)
+            log_fn(f"  ✅ {name} 完成（面部 {face_count} 部位 + 肢体 {limb_count} 部位）")
         else:
-            log_fn(f"  ⚠️  {person_name} 无有效人脸喵～(｡•́︿•̀｡)")
+            log_fn(f"  ⚠️  {person_name} 无有效特征喵～(｡•́︿•̀｡)")
 
         if progress_fn:
             progress_fn(processed[0], total_images, time.time() - start_time, "")
@@ -502,18 +681,56 @@ def cosine_similarity(a, b):
     import numpy as np
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6))
 
-def recognize_face(face_img, database: dict, threshold=0.45):
-    import cv2, torch
-    face = cv2.resize(face_img, (160, 160))
-    tensor = (torch.tensor(face).permute(2, 0, 1)
-              .float().unsqueeze(0).to(_device) / 255.0)
-    with torch.no_grad():
-        emb = _resnet(tensor).cpu().numpy().flatten()
+def recognize_character(face_img, database: dict, threshold=0.45,
+                        full_img=None, body_persons=None):
+    """
+    多部位综合识别——同时对比面部 + 肢体特征
+    face_img:  裁剪的人脸 RGB 图像
+    database:  特征库（{name: {key: embedding}}）
+    full_img:  完整 BGR 图像（用于提取肢体特征）
+    body_persons: YOLO-Pose 检测结果（用于提取肢体特征）
+    返回 (name, score)
+    """
+    import numpy as np
+
+    # 1. 提取输入图像的面部特征
+    face_emb = _extract_face_embedding(face_img)
+    if face_emb is None:
+        return (None, 0.0)
+
+    # 2. 如果有全身图像，提取肢体特征
+    limb_embs = {}
+    if full_img is not None and body_persons:
+        limb_embs = _extract_limb_embeddings(full_img, body_persons)
+
+    # 3. 对每个角色计算综合相似度
     best_name, best_score = None, 0.0
-    for name, ref in database.items():
-        s = cosine_similarity(emb, ref)
-        if s > best_score:
-            best_score, best_name = s, name
+    for name, parts in database.items():
+        if not isinstance(parts, dict):
+            continue
+
+        scores = []
+        weights = []
+
+        # 面部特征（5个键全部比较）
+        for key in FACE_KEYS:
+            if key in parts:
+                s = cosine_similarity(face_emb, parts[key])
+                scores.append(s)
+                weights.append(1.5)  # 面部权重更高
+
+        # 肢体特征（如果有）
+        for key in LIMB_KEYS:
+            if key in limb_embs and key in parts:
+                s = cosine_similarity(limb_embs[key], parts[key])
+                scores.append(s)
+                weights.append(1.0)
+
+        if scores:
+            avg_score = np.average(scores, weights=weights)
+            if avg_score > best_score:
+                best_score, best_name = avg_score, name
+
     return (best_name, best_score) if best_score >= threshold else (None, best_score)
 
 
@@ -811,6 +1028,7 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             return
 
         # 人体姿态检测（如果需要）并绘制框+骨骼
+        persons = []
         if body_mode:
             persons = detect_body_pose(img, log_fn)
             if persons:
@@ -838,7 +1056,8 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             if face.size == 0:
                 continue
             face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            name, score = recognize_face(face_rgb, database, threshold)
+            name, score = recognize_character(face_rgb, database, threshold,
+                                              full_img=img, body_persons=persons)
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
             txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
             img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
@@ -882,6 +1101,7 @@ def process_video_file(source: str, database: dict, output_path=None,
 
     frame_idx  = 0
     found_names: set = set()
+    persons = []  # 用于跨循环传递 body_persons
 
     try:
         while True:
@@ -917,7 +1137,8 @@ def process_video_file(source: str, database: dict, output_path=None,
                     if face.size == 0:
                         continue
                     face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                    name, score = recognize_face(face_rgb, database, threshold)
+                    name, score = recognize_character(face_rgb, database, threshold,
+                                                      full_img=frame, body_persons=persons)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
                     frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
@@ -1744,6 +1965,7 @@ class MoeFaceCLI:
             return
 
         # 人体姿态检测（如果需要）并绘制框+骨骼
+        persons = []
         if body_mode:
             persons = detect_body_pose(img, self._log)
             if persons:
@@ -1770,7 +1992,8 @@ class MoeFaceCLI:
             if face.size == 0:
                 continue
             face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            name, score = recognize_face(face_rgb, self.db, threshold)
+            name, score = recognize_character(face_rgb, self.db, threshold,
+                                              full_img=img, body_persons=persons)
             tag = CLIColors.SUCCESS if name else CLIColors.MUTED
             self._log(f"  {tag}{name or '未知'}{CLIColors.RESET} "
                       f"{CLIColors.MUTED}({score:.2f}){CLIColors.RESET} "
@@ -1818,6 +2041,7 @@ class MoeFaceCLI:
                                   fps, (w, h))
 
         frame_idx = 0
+        persons = []  # 用于跨循环传递 body_persons
         try:
             while True:
                 if self.stop_evt.is_set():
@@ -1853,7 +2077,8 @@ class MoeFaceCLI:
                         if face.size == 0:
                             continue
                         face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                        name, score = recognize_face(face_rgb, self.db, threshold)
+                        name, score = recognize_character(face_rgb, self.db, threshold,
+                                                          full_img=frame, body_persons=persons)
                         cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
                         frame = draw_chinese_text(frame,
                             f"{name or '?'} ({score:.2f})",
@@ -1907,6 +2132,7 @@ class MoeFaceCLI:
                 if not ret:
                     continue
 
+                persons = []
                 if body_mode:
                     persons = detect_body_pose(frame, self._log)
                     if persons:
@@ -1924,7 +2150,8 @@ class MoeFaceCLI:
                     if face.size == 0:
                         continue
                     face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                    name, score = recognize_face(face_rgb, self.db, threshold)
+                    name, score = recognize_character(face_rgb, self.db, threshold,
+                                                      full_img=frame, body_persons=persons)
                     cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
                     frame = draw_chinese_text(frame,
                         f"{name or '?'} ({score:.2f})",
@@ -2205,6 +2432,7 @@ def _get_web_app():
                 os.unlink(tmp_path)
                 return jsonify({"error": "无法解码图片"}), 400
 
+            persons = []
             if body_mode:
                 persons = detect_body_pose(img, log_buf.append)
                 if persons:
@@ -2227,7 +2455,8 @@ def _get_web_app():
                 if face.size == 0:
                     continue
                 face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                name, score = recognize_face(face_rgb, _web_db, threshold)
+                name, score = recognize_character(face_rgb, _web_db, threshold,
+                                                  full_img=img, body_persons=persons)
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 txt = f"{name or 'Unknown'} ({score:.2f})"
                 img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
