@@ -538,22 +538,26 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
     subdirs = [d for d in data_root.iterdir() if d.is_dir()]
 
     if subdirs:
-        game_dirs = [d for d in subdirs if any(e.is_dir() for e in d.iterdir())]
-        if game_dirs:
-            for game_dir in game_dirs:
-                for role_dir in game_dir.iterdir():
-                    if role_dir.is_dir():
-                        imgs = _gather(role_dir)
-                        if imgs:
-                            key = f"{game_dir.name}/{role_dir.name}"
-                            person_images[key] = imgs[:MAX_PER_PERSON]
-                            total_images += min(len(imgs), MAX_PER_PERSON)
-        else:
-            for person_dir in subdirs:
-                imgs = _gather(person_dir)
-                if imgs:
-                    person_images[person_dir.name] = imgs[:MAX_PER_PERSON]
-                    total_images += min(len(imgs), MAX_PER_PERSON)
+        # 分成两类：游戏目录（含子目录）和直接角色目录（直接放图片）
+        game_dirs  = [d for d in subdirs if any(e.is_dir() for e in d.iterdir())]
+        role_dirs  = [d for d in subdirs if d not in game_dirs]
+
+        # 直接角色目录（如 ATRI、warma）→ 直接收集图片
+        for person_dir in role_dirs:
+            imgs = _gather(person_dir)
+            if imgs:
+                person_images[person_dir.name] = imgs[:MAX_PER_PERSON]
+                total_images += min(len(imgs), MAX_PER_PERSON)
+
+        # 游戏目录（如 ddlc、vtuber）→ 递归处理子目录
+        for game_dir in game_dirs:
+            for role_dir in game_dir.iterdir():
+                if role_dir.is_dir():
+                    imgs = _gather(role_dir)
+                    if imgs:
+                        key = f"{game_dir.name}/{role_dir.name}"
+                        person_images[key] = imgs[:MAX_PER_PERSON]
+                        total_images += min(len(imgs), MAX_PER_PERSON)
     else:
         imgs = _gather(data_root)
         if imgs:
