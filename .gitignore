@@ -2,3 +2,5 @@
 *.pyc
 *.pyc
 /__pycache__
+*.bat
+*.bat
