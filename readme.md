@@ -1,6 +1,6 @@
 # MoeFace - 动漫人脸识别系统
 
-> 🌸 基于 FaceNet + LBP 动漫人脸检测的角色识别工具，支持图片/视频识别、**Web 浏览器界面（主推荐）**、Tkinter GUI（备用）、命令行（备用），以及角色特征库自动构建。
+> 🌸 基于 FaceNet + LBP 动漫人脸检测的角色识别工具，支持图片/视频识别、**Tkinter GUI 桌面界面（主推荐）**、命令行（备用），以及角色特征库自动构建。
 >
 > **示例效果**：将含有动漫角色的视频/图片拖入 Web 页面，系统自动框出人脸并标注角色名 + 相似度分数。详见下方 [Bug 截图示例](#注意事项)（含误识别说明）。
 
@@ -33,12 +33,10 @@ MoeFace/
 ├── demo/               # 示例图片
 ├── 视频示例/           # 示例视频文件
 │   └── taffy.mp4       # 示例视频
-├── templates/          # Web 前端页面（Flask）
-│   └── index.html      # 主界面
 ├── lbpcascade_animeface.xml  # 动漫人脸检测分类器
 ├── simhei.ttf          # 中文字体文件
 ├── 爬虫.py             # 角色图片爬取工具
-├── recognize.py        # 核心识别程序（内置 Web / GUI / CLI）
+├── recognize.py        # 核心识别程序（内置 GUI / CLI）
 ├── requirements.txt    # 依赖包列表
 ├── LICENSE             # 许可证文件
 └── readme.md           # 使用说明
@@ -80,7 +78,7 @@ requirements.txt 包含以下核心依赖：
 - pillow
 - requests
 - beautifulsoup4
-- **flask（Web 服务，必须）**
+- **flask（仅旧版 Web 服务需要）**
 - tkinterdnd2（Tkinter 拖拽支持，**仅 `--mode gui` 需要**）
 - moviepy（可选，用于保留视频音频）
 
@@ -107,37 +105,24 @@ python 爬虫.py
 - 内置了部分角色的关键词配置（可在代码中修改）
 - 自动跳过已存在的图片，避免重复
 
-### 二、人脸识别（Web 浏览器界面）【推荐】
+### 二、人脸识别（Tkinter 桌面 GUI）【推荐】
 
-**默认模式** — 无需任何参数，直接在浏览器中使用：
+**默认模式** — 直接启动 GUI 界面：
 
 ```bash
 python recognize.py
 ```
 
-启动后会自动打开浏览器，显示 Web 操作界面：
-- **拖拽图片/视频**到中央区域，或点击「打开图片/视频」按钮
+启动后显示 Tkinter 桌面窗口：
+- **拖拽图片/视频**到窗口，或点击「打开文件」按钮
 - **左侧面板**选择特征库、调整识别参数
 - **实时预览**识别结果和运行日志
 
-#### Web 参数说明
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--host` | Web 监听地址 | 127.0.0.1 |
-| `--port` / `-p` | Web 端口 | 5000 |
-
-示例（局域网访问）：
-```bash
-python recognize.py --host 0.0.0.0 --port 8080
-```
-
 ---
 
-### 三、人脸识别（Tkinter 桌面 GUI / 命令行）【备用】
+### 三、人脸识别（命令行）【备用】
 
-> GUI 和 CLI 作为备用手段，需要显式指定 `--mode` 参数：
-> - `--mode gui` → Tkinter 桌面窗口 （拖拽识别）
-> - `--mode cli` → 终端命令行模式
+> CLI 作为备用手段，需要显式指定 `--mode cli` 参数：
 
 #### 3.1 列出可用的特征库
 ```bash
@@ -174,10 +159,7 @@ python recognize.py --mode cli --source 视频示例/taffy.mp4 --output output.m
 ### 四、参数说明
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--mode` / `-m` | 运行模式: `web`（浏览器）/ `gui`（桌面）/ `cli`（终端） | web |
-| `--host` | Web 监听地址（仅 web 模式） | 127.0.0.1 |
-| `--port` / `-p` | Web 端口（仅 web 模式） | 5000 |
-| `--data` | 特征库图片文件夹路径 | ./data |
+| `--mode` / `-m` | 运行模式: `gui`（桌面，默认）/ `cli`（终端） | gui |
 | `--source` / `-s` | 视频文件路径或摄像头ID（仅 cli 模式） | 无 |
 | `--camera` / `-c` | 使用摄像头模式（仅 cli 模式） | False |
 | `--output` / `-o` | 输出视频路径 | 无 |
@@ -329,5 +311,4 @@ MoeFace 是一个专注于 **动漫人脸识别** 的开源项目，旨在为 VT
 ### 项目链接
 - **官网**: https://ciallo0721-cmd.top/moeface/
 - **GitHub**: https://github.com/ciallo0721-cmd/MoeFace
-- **Web 在线版**: https://ciallo0721-cmd.top/moeface-web/
 - **使用教程**: https://ciallo0721-cmd.top/blog/科技/python/21/ 

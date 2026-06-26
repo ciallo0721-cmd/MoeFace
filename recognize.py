@@ -2,7 +2,7 @@
 MoeFace — 动漫人脸识别系统 / VTuber 二次元角色识别工具
 基于 FaceNet + OpenCV 实现动漫人脸检测与特征匹配
 支持 VTuber / 虚拟主播识别，本地运行保护隐私
-GUI 版本 (Tkinter) + CLI 版本 (终端图形化) + Flask Web 服务版
+GUI 版本 (Tkinter) + CLI 版本 (终端图形化)
 """
 
 """
@@ -21,12 +21,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import Tuple, List, Optional, Dict, Any
 
-# Flask Web 服务（使用时才创建 app）
-import flask
-from flask import Flask, request, jsonify, render_template, Response, stream_with_context, send_file
-import queue
-import uuid as _uuid
-import base64 as _b64
 
 # ── 确保以脚本所在目录为基准路径 ────────────────────────────────────────────
 import sys as _sys
@@ -2232,28 +2226,15 @@ def _parse_args():
         prog="MoeFace",
         description="MoeFace 动漫人脸识别系统",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="示例: python recognize.py  （启动 Web 界面）\n"
-               "       python recognize.py --mode gui  （启动 Tkinter 界面）\n"
+        epilog="示例: python recognize.py --mode gui  （启动 Tkinter 界面）\n"
                "       python recognize.py --mode cli --source video.mp4 --output out.mp4"
     )
 
     parser.add_argument(
         "--mode", "-m",
-        choices=["web", "gui", "cli"],
-        default="web",
-        help="运行模式: web=浏览器界面(默认), gui=Tkinter桌面界面, cli=终端界面"
-    )
-
-    parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Web 服务监听地址（默认: 127.0.0.1，仅 --mode web 生效）"
-    )
-    parser.add_argument(
-        "--port", "-p",
-        type=int,
-        default=5000,
-        help="Web 服务监听端口（默认: 5000，仅 --mode web 生效）"
+        choices=["gui", "cli"],
+        default="gui",
+        help="运行模式: gui=Tkinter桌面界面(默认), cli=终端界面"
     )
 
     parser.add_argument(
@@ -2319,307 +2300,6 @@ def _parse_args():
     return parser.parse_args()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Flask Web 服务
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Web 服务全局状态
-_web_db = {}
-_web_db_name = ""
-_web_tasks = {}
-_web_task_lock = threading.Lock()
-_web_app = None
-
-def _get_web_app():
-    """延迟创建 Flask app（避免 import 时自动加载）"""
-    global _web_app
-    if _web_app is not None:
-        return _web_app
-
-    import cv2, numpy as np
-
-    app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
-
-    # ── 首页 ──
-    @app.route("/")
-    def _web_index():
-        return render_template("index.html")
-
-    # ── API: 状态 ──
-    @app.route("/api/status")
-    def _web_status():
-        return jsonify({
-            "models_ready": _models_ready,
-            "db_loaded": bool(_web_db),
-            "db_name": _web_db_name,
-            "db_count": len(_web_db),
-        })
-
-    # ── API: 特征库列表 ──
-    @app.route("/api/databases")
-    def _web_databases():
-        roles = scan_role_folders()
-        return jsonify({
-            "databases": [DEFAULT_DB_NAME] + roles,
-            "current": _web_db_name or DEFAULT_DB_NAME,
-        })
-
-    # ── API: 加载特征库 ──
-    @app.route("/api/database/load", methods=["POST"])
-    def _web_db_load():
-        data = request.get_json() or {}
-        db_name = data.get("db_name", DEFAULT_DB_NAME)
-        force_rebuild = data.get("rebuild", False)
-
-        msg_buf = []
-        def _log(m): msg_buf.append(m)
-        def _progress(cur, tot, elapsed=0, label=""): pass
-
-        db, built = get_or_build_database(db_name, force_rebuild=force_rebuild,
-                                           log_fn=_log, progress_fn=_progress)
-        global _web_db, _web_db_name
-        _web_db = db
-        _web_db_name = db_name
-
-        return jsonify({
-            "ok": bool(db),
-            "db_name": db_name,
-            "count": len(db),
-            "built": built,
-            "message": f"加载完成，共 {len(db)} 个角色" if db else "特征库为空喵~",
-            "logs": msg_buf,
-        })
-
-    # ── API: 识别文件（图片/视频）──
-    @app.route("/api/recognize", methods=["POST"])
-    def _web_recognize():
-        if "file" not in request.files:
-            return jsonify({"error": "未提供文件"}), 400
-
-        file = request.files["file"]
-        if file.filename == "":
-            return jsonify({"error": "文件名为空"}), 400
-
-        threshold = float(request.form.get("threshold", 0.45))
-        skip_frames = int(request.form.get("skip_frames", 2))
-        min_neighbors = int(request.form.get("min_neighbors", 3))
-        body_mode = request.form.get("body_mode", "0") == "1"
-        output = request.form.get("output", "").strip()
-
-        # 保存到临时文件
-        suffix = Path(file.filename).suffix.lower()
-        (BASE_DIR / "temp").mkdir(exist_ok=True)
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=str(BASE_DIR / "temp"))
-        file.save(tmp.name)
-        tmp_path = tmp.name
-        tmp.close()
-
-        # 确保模型已加载
-        if not _models_ready:
-            if not _ensure_models(lambda m: None):
-                os.unlink(tmp_path)
-                return jsonify({"error": "模型加载失败"}), 500
-
-        # 确保特征库已加载
-        if not _web_db:
-            os.unlink(tmp_path)
-            return jsonify({"error": "特征库未加载"}), 400
-
-        log_buf = []
-
-        # ── 图片处理 ──
-        if suffix in IMAGE_EXTS:
-            with open(tmp_path, "rb") as f:
-                data = np.frombuffer(f.read(), dtype=np.uint8)
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            if img is None:
-                os.unlink(tmp_path)
-                return jsonify({"error": "无法解码图片"}), 400
-
-            persons = []
-            if body_mode:
-                persons = detect_body_pose(img, log_buf.append)
-                if persons:
-                    img = draw_body_skeleton(img, persons, show_labels=False)
-                    log_buf.append(f"✅ 检测到 {len(persons)} 个人体")
-
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            cascade = _get_thread_cascade()
-            faces = cascade.detectMultiScale(
-                gray, scaleFactor=1.02, minNeighbors=min_neighbors,
-                minSize=(20, 20), maxSize=(800, 800)
-            )
-            log_buf.append(f"检测到 {len(faces)} 张人脸")
-
-            img_result = {"faces": []}
-            for (x, y, fw, fh) in faces:
-                x1, y1 = max(0, x), max(0, y)
-                x2, y2 = min(img.shape[1], x+fw), min(img.shape[0], y+fh)
-                face = img[y1:y2, x1:x2]
-                if face.size == 0:
-                    continue
-                face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                name, score = recognize_character(face_rgb, _web_db, threshold,
-                                                  full_img=img, body_persons=persons)
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                txt = f"{name or 'Unknown'} ({score:.2f})"
-                img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
-                log_buf.append(f"{'✅' if name else '❓'} {txt}")
-                img_result["faces"].append({
-                    "name": name or "Unknown", "score": round(score, 4),
-                    "x": int(x), "y": int(y), "w": int(fw), "h": int(fh),
-                })
-
-            _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            b64 = _b64.b64encode(buf).decode("utf-8")
-            os.unlink(tmp_path)
-            return jsonify({
-                "type": "image",
-                "image": b64,
-                "faces": img_result["faces"],
-                "logs": log_buf,
-            })
-
-        # ── 视频处理（后台 + SSE）──
-        elif suffix in VIDEO_EXTS:
-            task_id = _uuid.uuid4().hex[:8]
-            log_q = queue.Queue()
-            out_path = output if output else str(BASE_DIR / "temp" / f"output_{task_id}{suffix}")
-            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-            stop_evt = threading.Event()
-            preview_counter = [0]
-
-            def _run():
-                def _log_v(m):
-                    log_q.put({"type": "log", "msg": m})
-                def _preview_v(cv_img):
-                    preview_counter[0] += 1
-                    if preview_counter[0] % 15 != 0:
-                        return
-                    _, buf = cv2.imencode(".jpg", cv_img, [cv2.IMWRITE_JPEG_QUALITY, 60])
-                    b64 = _b64.b64encode(buf).decode("utf-8")
-                    log_q.put({"type": "preview", "image": b64})
-                def _progress_v(cur, tot, *a):
-                    pct = round(cur / max(tot, 1) * 100, 1)
-                    log_q.put({"type": "progress", "percent": pct, "text": f"{pct}% ({cur}/{tot})"})
-
-                process_video_file(
-                    source=tmp_path, database=_web_db,
-                    output_path=out_path, threshold=threshold,
-                    skip_frames=skip_frames, min_neighbors=min_neighbors,
-                    body_mode=body_mode, log_fn=_log_v, preview_fn=_preview_v,
-                    stop_event=stop_evt, done_fn=lambda: None,
-                )
-
-                if os.path.exists(out_path):
-                    log_q.put({"type": "done", "result_url": f"/api/task/{task_id}/result"})
-                    with _web_task_lock:
-                        if task_id in _web_tasks:
-                            _web_tasks[task_id]["out_path"] = out_path
-                else:
-                    log_q.put({"type": "done", "result_url": None})
-
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-
-            with _web_task_lock:
-                _web_tasks[task_id] = {
-                    "thread": t, "stop_evt": stop_evt,
-                    "queue": log_q, "tmp_path": tmp_path, "out_path": None,
-                }
-
-            return jsonify({"type": "video", "task_id": task_id})
-
-        os.unlink(tmp_path)
-        return jsonify({"error": "不支援的文件格式喵~"}), 400
-
-    # ── SSE: 任务流 ──
-    @app.route("/api/task/<task_id>/stream")
-    def _web_task_stream(task_id):
-        task = _web_tasks.get(task_id)
-        if not task:
-            return jsonify({"error": "任务不存在"}), 404
-
-        def generate():
-            q = task["queue"]
-            while True:
-                try:
-                    msg = q.get(timeout=30)
-                except queue.Empty:
-                    yield ": keepalive\n\n"
-                    continue
-                if msg.get("type") == "done":
-                    yield f"data: {json.dumps(msg)}\n\n"
-                    break
-                yield f"data: {json.dumps(msg)}\n\n"
-            try:
-                tp = task.get("tmp_path")
-                if tp and os.path.exists(tp):
-                    os.unlink(tp)
-            except: pass
-            _web_tasks.pop(task_id, None)
-
-        return Response(stream_with_context(generate()), mimetype="text/event-stream")
-
-    # ── API: 停止任务 ──
-    @app.route("/api/task/<task_id>/stop", methods=["POST"])
-    def _web_task_stop(task_id):
-        task = _web_tasks.get(task_id)
-        if not task:
-            return jsonify({"error": "任务不存在"}), 404
-        task["stop_evt"].set()
-        return jsonify({"ok": True})
-
-    # ── API: 下载结果 ──
-    @app.route("/api/task/<task_id>/result")
-    def _web_task_result(task_id):
-        task = _web_tasks.get(task_id)
-        out_path = task.get("out_path") if task else None
-        if out_path and os.path.exists(out_path):
-            return send_file(out_path, as_attachment=True)
-        return jsonify({"error": "结果文件不存在"}), 404
-
-    # ── API: 别名管理 ──
-    @app.route("/api/aliases", methods=["GET", "PUT"])
-    def _web_aliases():
-        if request.method == "GET":
-            try:
-                with open(CNAME_PATH, "r", encoding="utf-8") as f:
-                    content = json.load(f)
-                return jsonify({"ok": True, "aliases": content})
-            except Exception as e:
-                return jsonify({"ok": False, "error": str(e)})
-        else:
-            try:
-                data = request.get_data(as_text=True)
-                parsed = json.loads(data)
-                with open(CNAME_PATH, "w", encoding="utf-8") as f:
-                    json.dump(parsed, f, indent=2, ensure_ascii=False)
-                global ALIAS_MAP
-                ALIAS_MAP = load_alias_map()
-                return jsonify({"ok": True})
-            except Exception as e:
-                return jsonify({"ok": False, "error": str(e)})
-
-    _web_app = app
-    return app
-
-def start_web_server(host="127.0.0.1", port=5000):
-    """启动 Flask Web 服务"""
-    import webbrowser as _wb
-    url = f"http://{host}:{port}"
-    print(f"\n  ┌─────────────────────────────────────────────┐")
-    print(f"  │  🎭 MoeFace 动漫人脸识别系统                │")
-    print(f"  │  主界面 → Web 浏览器                        │")
-    print(f"  │  🌐 {url:<37s}│")
-    print(f"  │  备用: python recognize.py --mode gui/cli    │")
-    print(f"  │  ⏹  Ctrl+C 停止服务                        │")
-    print(f"  └─────────────────────────────────────────────┘\n")
-    _wb.open(url)
-    app = _get_web_app()
-    app.run(host=host, port=port, debug=False, use_reloader=False)
-
-
 # ── 入口 ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import cv2   # 预先导入用于线程本地存储
@@ -2635,9 +2315,7 @@ if __name__ == "__main__":
         print("")
         sys.exit(0)
 
-    if args.mode == "web":
-        start_web_server(host=args.host, port=args.port)
-    elif args.mode == "gui":
+    if args.mode == "gui":
         app = MoeFaceApp()
         app.run()
     else:
