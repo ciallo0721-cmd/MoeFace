@@ -34,13 +34,50 @@
     ]
   },
   {
-    "db_name": "Ayachi_Nene",
+    "db_name": "绫地宁宁",
     "aliases": [
-      "Ayachi",
-      "Nene",
       "绫地宁宁",
       "宁宁",
-      "绫地"
+      "绫地",
+      "Ayachi",
+      "Nene"
+    ]
+  },
+  {
+    "db_name": "假屋和奏",
+    "aliases": [
+      "假屋和奏",
+      "和奏",
+      "Kazana",
+      "Kariya"
+    ]
+  },
+  {
+    "db_name": "因幡巡",
+    "aliases": [
+      "因幡巡",
+      "巡",
+      "Meguru",
+      "Inaba"
+    ]
+  },
+  {
+    "db_name": "户隐憧子",
+    "aliases": [
+      "户隐憧子",
+      "憧子",
+      "Touko",
+      "Togakushi",
+      "戸隠憧子"
+    ]
+  },
+  {
+    "db_name": "相马七绪",
+    "aliases": [
+      "相马七绪",
+      "七绪",
+      "Nanao",
+      "Souma"
     ]
   },
   {
@@ -326,12 +363,14 @@
     ]
   },
   {
-    "db_name": "Shiiba_Tsumugi",
+    "db_name": "椎叶䌷",
     "aliases": [
-      "椎叶紬",
-      "紬",
+      "椎叶䌷",
+      "䌷",
       "Tsumugi",
-      "Shiiba"
+      "Shiiba",
+      "椎叶紬",
+      "紬"
     ]
   },
   {

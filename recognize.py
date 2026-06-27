@@ -98,18 +98,30 @@ def load_alias_map(path: Path = CNAME_PATH):
 ALIAS_MAP = load_alias_map()
 
 def get_db_name_from_filename(filename: str) -> str:
+    """根据文件名匹配角色别名（短别名要求词边界，避免误杀）"""
+    import re as _re
     name_lower = filename.lower()
     for entry in ALIAS_MAP:
         for alias in entry.get("aliases", []):
-            if alias.lower() in name_lower:
-                return entry["db_name"]
+            alias_lower = alias.lower()
+            # 拉丁短别名（< 4 字）：严格词边界匹配
+            if len(alias_lower) <= 3 and not any('\u4e00' <= c <= '\u9fff' for c in alias_lower):
+                if _re.search(r'(?<!\w)' + _re.escape(alias_lower) + r'(?!\w)', name_lower):
+                    return entry["db_name"]
+            # 单字中文别名：前后须为文件名边界（避免"希"匹配"希望"）
+            elif len(alias) == 1 and '\u4e00' <= alias <= '\u9fff':
+                if _re.search(r'(^|[^\u4e00-\u9fff])' + _re.escape(alias) + r'([^\u4e00-\u9fff]|$)', filename):
+                    return entry["db_name"]
+            else:
+                if alias_lower in name_lower:
+                    return entry["db_name"]
     return DEFAULT_DB_NAME
 
 
 # ── 特征库管理（自研 .moe 格式）───────────────────────────────────────
 def _safe_filename(name: str) -> str:
     """生成安全的文件名（保留中文、字母、数字、部分符号）"""
-    keep = set("._- ·•/")
+    keep = set("._- ·•")
     return "".join(c for c in name if c.isalnum() or c in keep or "\u4e00" <= c <= "\u9fff")
 
 
@@ -502,7 +514,7 @@ def extract_multi_features_from_image(image_path: str, log_fn=print):
     return results if results else None
 
 
-def build_database(data_root: Path, log_fn=print, progress_fn=None):
+def build_database(data_root: Path, log_fn=print, progress_fn=None, stop_event=None):
     """构建多部位特征库——每个角色存储 11 个部位的平均特征向量"""
     if not _ensure_models(log_fn):
         log_fn("❌ 模型加载失败，无法构建特征库")
@@ -521,8 +533,8 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
     def _gather(folder):
         files = []
         for ext in exts:
-            files += list(folder.glob(f"*{ext}"))
-            files += list(folder.glob(f"*{ext.upper()}"))
+            files += list(folder.glob(f"**/*{ext}"))
+            files += list(folder.glob(f"**/*{ext.upper()}"))
         return files
 
     MAX_PER_PERSON = 50
@@ -577,6 +589,9 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
         collected = {key: [] for key in FEATURE_KEYS}
 
         for i, p in enumerate(imgs):
+            if stop_event and stop_event.is_set():
+                log_fn(f"⏹ 建库停止（{person_name} 处理到第 {i+1}/{len(imgs)} 张）")
+                return None
             all_feats = extract_multi_features_from_image(str(p), log_fn)
             if all_feats:
                 for key in FEATURE_KEYS:
@@ -602,6 +617,9 @@ def build_database(data_root: Path, log_fn=print, progress_fn=None):
         return None
 
     for person_name in person_images.keys():
+        if stop_event and stop_event.is_set():
+            log_fn("⏹ 建库已停止")
+            break
         result = _process_person(person_name)
         if result is not None:
             name, parts = result
@@ -641,7 +659,7 @@ def _find_role_path(db_name: str) -> Path:
     return None
 
 
-def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None) -> Tuple[dict, bool]:
+def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progress_fn=None, stop_event=None) -> Tuple[dict, bool]:
     """获取或构建特征库，返回 (database, built)"""
     if not force_rebuild:
         # 优先加载 .moe 格式
@@ -655,9 +673,13 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
             log_fn(f"✅ 从 .json 缓存加载特征库 [{db_name}]，共 {len(db)} 个角色（建议转为 .moe 格式）")
             return db, False
 
+    if stop_event and stop_event.is_set():
+        log_fn("⏹ 建库已停止")
+        return {}, True
+
     if db_name == DEFAULT_DB_NAME:
         log_fn("构建全部特征库喵...")
-        db = build_database(DATA_DIR, log_fn, progress_fn)
+        db = build_database(DATA_DIR, log_fn, progress_fn, stop_event)
     else:
         db_path = _find_role_path(db_name)
         if db_path is None:
@@ -666,7 +688,7 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
                 log_fn(f"❌ 文件夹不存在: {db_path}")
                 return {}, True
         log_fn(f"构建特征库喵~: {db_name}")
-        db = build_database(db_path, log_fn, progress_fn)
+        db = build_database(db_path, log_fn, progress_fn, stop_event)
 
     if db:
         save_database_to_moe(db, db_name)
@@ -1013,10 +1035,16 @@ def _add_audio(src_video, out_video, tmp_video):
 
 def process_image_file(source: str, database: dict, threshold=0.45,
                        min_neighbors=3, body_mode=False,
-                       log_fn=print, preview_fn=None, done_fn=None):
+                       log_fn=print, preview_fn=None, done_fn=None,
+                       stop_event=None):
     import cv2
     import numpy as np
     try:
+        if stop_event and stop_event.is_set():
+            log_fn("⏹ 已停止")
+            if done_fn: done_fn()
+            return
+
         with open(source, "rb") as f:
             data = np.frombuffer(f.read(), dtype=np.uint8)
         img = cv2.imdecode(data, cv2.IMREAD_COLOR)
@@ -1047,6 +1075,9 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             log_fn(f"检测到 {len(faces)} 张人脸")
 
         for (x, y, w, h) in faces:
+            if stop_event and stop_event.is_set():
+                log_fn("⏹ 已停止")
+                break
             x1 = max(0, x); y1 = max(0, y)
             x2 = min(img.shape[1], x + w)
             y2 = min(img.shape[0], y + h)
@@ -1626,7 +1657,7 @@ class MoeFaceApp:
             if suggested != db_name or not db:
                 self._log(f" 自动选择特征库: {suggested}")
                 self.root.after(0, lambda: self._db_var.set(suggested))
-                db, _ = get_or_build_database(suggested, log_fn=self._log)
+                db, _ = get_or_build_database(suggested, log_fn=self._log, stop_event=self._stop_evt)
                 self._database = db
                 self._db_name  = suggested
 
@@ -1648,6 +1679,7 @@ class MoeFaceApp:
                     body_mode=body_mode,
                     log_fn=self._log,
                     preview_fn=self._show_frame_cv,
+                    stop_event=self._stop_evt,
                     done_fn=lambda: self._set_busy(False),
                 )
             elif suffix in VIDEO_EXTS:
