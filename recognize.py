@@ -21,6 +21,46 @@ from pathlib import Path
 from datetime import datetime
 from typing import Tuple, List, Optional, Dict, Any
 
+# ── AI 识别模块（2026-06-29 新增）──────────────────────────────────────
+_AI_MODULES_LOADED = False
+_EMOTION_MODULE = None
+_SPEECH_MODULE = None
+_NSFW_MODULE = None
+_AI_MODULE_LOCK = threading.Lock()
+
+
+def _ensure_ai_modules(light=False, log_fn=print):
+    """懒加载 AI 识别模块（线程安全）"""
+    global _AI_MODULES_LOADED, _EMOTION_MODULE, _SPEECH_MODULE, _NSFW_MODULE
+    if _AI_MODULES_LOADED:
+        return True
+    with _AI_MODULE_LOCK:
+        if _AI_MODULES_LOADED:
+            return True
+        try:
+            from modules import EmotionRecognizer, SpeechRecognizer, NSFWDetector
+
+            _EMOTION_MODULE = EmotionRecognizer()
+            _EMOTION_MODULE.ensure_initialized(log_fn)
+            _NSFW_MODULE = NSFWDetector()
+            _NSFW_MODULE.ensure_initialized(log_fn)
+
+            if not light:
+                _SPEECH_MODULE = SpeechRecognizer(model_size="base")
+                _SPEECH_MODULE.ensure_initialized(log_fn)
+
+            _AI_MODULES_LOADED = True
+            log_fn("✅ AI 识别模块已就绪（情绪/语音/NSFW）" if not light
+                   else "✅ AI 轻量模块已就绪（情绪/NSFW）")
+            return True
+        except Exception as e:
+            log_fn(f"⚠️ AI 模块加载失败: {e}")
+            return False
+
+
+# 通用导入（供 CLI/GUI 使用）
+from modules.base import AIResult, AIResultCollection
+
 
 # ── 确保以脚本所在目录为基准路径 ────────────────────────────────────────────
 import sys as _sys
@@ -1036,9 +1076,13 @@ def _add_audio(src_video, out_video, tmp_video):
 def process_image_file(source: str, database: dict, threshold=0.45,
                        min_neighbors=3, body_mode=False,
                        log_fn=print, preview_fn=None, done_fn=None,
-                       stop_event=None):
+                       stop_event=None,
+                       # ── AI 模块参数 ──────────────────────────────────
+                       enable_emotion=False, enable_nsfw=False,
+                       ai_results=None):
     import cv2
     import numpy as np
+    from modules.base import AIResult
     try:
         if stop_event and stop_event.is_set():
             log_fn("⏹ 已停止")
@@ -1063,7 +1107,48 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             else:
                 log_fn("⚠️ 未检测到人体喵~")
 
-        # 人脸识别（始终执行，无论 body_mode 是否开启，实现“同时检测”）
+        # ── AI 增强：情绪识别 ──────────────────────────────────────────
+        if enable_emotion and _EMOTION_MODULE is not None:
+            log_fn("😊 情绪识别中...")
+            try:
+                emotions = _EMOTION_MODULE.process_frame(img, timestamp=0.0)
+                if emotions:
+                    for emo in emotions:
+                        ai_results.add(AIResult(
+                            module="emotion", event_type="face_emotion",
+                            timestamp=0.0, data=emo, confidence=emo["confidence"],
+                        ))
+                    log_fn(f"  ✅ 检测到 {len(emotions)} 张人脸情绪")
+                    # 在图片上标注情绪
+                    for emo in emotions:
+                        bx, by, bw, bh = emo["bbox"]
+                        label = emo["emotion_label"]
+                        conf = emo["confidence"]
+                        img = draw_chinese_text(
+                            img, f"[{label}] {conf:.0%}",
+                            (bx, by + bh + 5), 14, (255, 200, 0)
+                        )
+            except Exception as e:
+                log_fn(f"  ⚠️ 情绪识别异常: {e}")
+
+        # ── AI 增强：NSFW 检测 ─────────────────────────────────────────
+        if enable_nsfw and _NSFW_MODULE is not None:
+            log_fn("🔞 NSFW 检测中...")
+            try:
+                nsfw_result = _NSFW_MODULE.process_frame(img, timestamp=0.0)
+                if nsfw_result:
+                    ai_results.add(nsfw_result)
+                    nsfw_label = nsfw_result.data.get("label_cn", "未知")
+                    nsfw_score = nsfw_result.data.get("nsfw_score", 0.0)
+                    log_fn(f"  {nsfw_label}: {nsfw_score:.1%}")
+                    img = draw_chinese_text(
+                        img, f"NSFW: {nsfw_label} ({nsfw_score:.1%})",
+                        (10, 30), 16, (255, 100, 100)
+                    )
+            except Exception as e:
+                log_fn(f"  ⚠️ NSFW 检测异常: {e}")
+
+        # 人脸识别（始终执行，无论 body_mode 是否开启，实现"同时检测"）
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         faces = _anime_cascade.detectMultiScale(
             gray, scaleFactor=1.02, minNeighbors=min_neighbors,
@@ -1104,8 +1189,12 @@ def process_video_file(source: str, database: dict, output_path=None,
                        threshold=0.45, skip_frames=2, min_neighbors=3,
                        body_mode=False,
                        log_fn=print, preview_fn=None,
-                       stop_event: threading.Event = None, done_fn=None):
+                       stop_event: threading.Event = None, done_fn=None,
+                       # ── AI 模块参数 ──────────────────────────────────
+                       enable_emotion=False, enable_speech=False,
+                       enable_nsfw=False, ai_results=None):
     import cv2
+    from modules.base import AIResult
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         log_fn(f"❌ 无法打开视频喵~: {source}")
@@ -1131,6 +1220,8 @@ def process_video_file(source: str, database: dict, output_path=None,
     frame_idx  = 0
     found_names: set = set()
     persons = []  # 用于跨循环传递 body_persons
+    # ── 画面角色时间线（用于语音转文字角色关联）──────────────────────
+    _face_timeline: list = []
 
     try:
         while True:
@@ -1173,6 +1264,47 @@ def process_video_file(source: str, database: dict, output_path=None,
                     frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
                     if name:
                         found_names.add(name)
+                        # 收集画面角色时间线（供语音角色关联使用）
+                        if enable_speech:
+                            _face_timeline.append({
+                                "timestamp": frame_idx / fps if fps > 0 else 0.0,
+                                "names": [name],
+                            })
+
+                # ── AI 增强：帧级情绪识别 ──────────────────────────────
+                if enable_emotion and _EMOTION_MODULE is not None:
+                    try:
+                        timestamp = frame_idx / fps
+                        emotions = _EMOTION_MODULE.process_frame(
+                            frame, timestamp,
+                            face_boxes=faces if len(faces) > 0 else None,
+                        )
+                        for emo in emotions:
+                            if ai_results is not None:
+                                ai_results.add(AIResult(
+                                    module="emotion", event_type="face_emotion",
+                                    timestamp=timestamp, data=emo,
+                                    confidence=emo["confidence"],
+                                ))
+                            # 在画面上标注情绪
+                            bx, by, bw, bh = emo["bbox"]
+                            img_label = emo["emotion_label"]
+                            frame = draw_chinese_text(
+                                frame, f"{img_label}",
+                                (bx, by + bh + 2), 12, (255, 200, 0)
+                            )
+                    except Exception:
+                        pass
+
+                # ── AI 增强：帧级 NSFW 检测 ─────────────────────────────
+                if enable_nsfw and _NSFW_MODULE is not None:
+                    try:
+                        timestamp = frame_idx / fps
+                        nsfw_result = _NSFW_MODULE.process_frame(frame, timestamp)
+                        if nsfw_result and ai_results is not None:
+                            ai_results.add(nsfw_result)
+                    except Exception:
+                        pass
 
             if preview_fn and frame_idx % skip_frames == 0:
                 preview_fn(frame.copy())
@@ -1195,8 +1327,95 @@ def process_video_file(source: str, database: dict, output_path=None,
         _add_audio(source, output_path, tmp_out)
         log_fn(f" 已保存: {output_path}了喵~")
 
+    # ── AI 增强：语音转文字 + 说话人分离 ────────────────────────────
+    if enable_speech and _SPEECH_MODULE is not None and ai_results is not None:
+        log_fn("🎤 语音转文字 + 说话人分离中...")
+        log_fn("ℹ️ 首次运行可能需要下载模型，请耐心等待")
+        try:
+            # 将已知角色名作为说话人候选
+            known_speakers = None
+            if database:
+                known_speakers = {}
+                for i, name in enumerate(database.keys()):
+                    known_speakers[f"speaker_{i}"] = name
+
+            # 视频路径传给语音模块，它会自动提取音频
+            speech_results = _SPEECH_MODULE.process_video(
+                video_path=source,
+                language="auto",
+                enable_diarization=True,
+                known_speakers=known_speakers,
+                log_fn=log_fn,
+                stop_event=stop_event,
+                face_timeline=_face_timeline,
+            )
+            # 合并结果
+            ai_results.extend(speech_results.results)
+
+            # 打印摘要
+            utterances = [r for r in speech_results.results
+                          if r.get("event_type") == "utterance"]
+            log_fn(f"  ✅ 共转录 {len(utterances)} 句话")
+            for utt in utterances[:10]:  # 只打印前 10 句
+                d = utt.get("data", {})
+                log_fn(f"  [{d.get('speaker_name','?')}] {d.get('text','')[:60]}")
+            if len(utterances) > 10:
+                log_fn(f"  ...还有 {len(utterances) - 10} 句（详见 JSON 结果）")
+
+            # 语义 NSFW：分析转录文本
+            if enable_nsfw and _NSFW_MODULE is not None:
+                log_fn("🔞 语义 NSFW 检测（分析语音内容）...")
+                for utt in utterances[:]:  # 使用切片避免重复
+                    d = utt.get("data", {})
+                    text = d.get("text", "")
+                    if text.strip():
+                        nsfw_text_result = _NSFW_MODULE.process_text(
+                            text=text,
+                            timestamp=d.get("start", 0.0),
+                            source="transcript",
+                        )
+                        if nsfw_text_result and nsfw_text_result.confidence > 0:
+                            ai_results.add(nsfw_text_result)
+                            log_fn(f"  ⚠️ NSFW 语义检测: {nsfw_text_result.data.get('nsfw_score', 0):.1%}")
+        except Exception as e:
+            log_fn(f"  ⚠️ 语音识别异常: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # ── AI 结果保存 ─────────────────────────────────────────────────
+    if ai_results is not None and len(ai_results) > 0:
+        try:
+            out_base = Path(source).stem
+            save_analysis_result(ai_results, str(Path(source).parent / out_base), log_fn)
+        except Exception as e:
+            log_fn(f"  ⚠️ 保存 AI 结果失败: {e}")
+
     if done_fn:
         done_fn()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AI 结果输出工具
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_analysis_result(collection, output_base: str, log_fn=print):
+    """
+    保存 AI 模块分析结果为 JSON 文件。
+    若已启用多个模块，结果会合并到一个 JSON 中。
+    """
+    if not collection or len(collection) == 0:
+        log_fn("ℹ️ 无分析结果可保存")
+        return None
+
+    output_json = f"{output_base}.ai_result.json"
+    try:
+        with open(output_json, "w", encoding="utf-8") as f:
+            f.write(collection.to_json())
+        log_fn(f"💾 分析结果已保存: {output_json}")
+        return output_json
+    except Exception as e:
+        log_fn(f"⚠️ 保存分析结果失败: {e}")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1230,6 +1449,10 @@ class MoeFaceApp:
 
         self._auto_shutdown_var = tk.BooleanVar(value=False)
         self._body_mode_var = tk.BooleanVar(value=False)  # 人体姿态检测模式
+        # ── AI 识别模块开关（2026-06-29 新增）─────────────────────────
+        self._emotion_mode_var = tk.BooleanVar(value=False)  # 情绪识别
+        self._speech_mode_var = tk.BooleanVar(value=False)   # 语音转文字
+        self._nsfw_mode_var = tk.BooleanVar(value=False)     # NSFW 检测
 
         self._build_ui()
         self._load_models_async()
@@ -1333,6 +1556,35 @@ class MoeFaceApp:
             activebackground=PANEL, activeforeground="#7c3aed"
         )
         self._body_mode_cb.pack(anchor="w", padx=10, pady=2)
+
+        # ── AI 识别模块复选框 ──────────────────────────────────────────
+        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=4)
+        self._lbl(parent, "AI 识别增强（实验性功能）", PANEL, MUTED,
+                  font=("微软雅黑", 8)).pack(**pad)
+
+        self._emotion_cb = tk.Checkbutton(
+            parent, text="😊 表情 & 情绪识别",
+            variable=self._emotion_mode_var,
+            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
+            activebackground=PANEL, activeforeground="#f59e0b"
+        )
+        self._emotion_cb.pack(anchor="w", padx=10, pady=1)
+
+        self._speech_cb = tk.Checkbutton(
+            parent, text="🎤 语音转文字 + 说话人分离",
+            variable=self._speech_mode_var,
+            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
+            activebackground=PANEL, activeforeground="#f59e0b"
+        )
+        self._speech_cb.pack(anchor="w", padx=10, pady=1)
+
+        self._nsfw_cb = tk.Checkbutton(
+            parent, text="🔞 NSFW 内容检测（仅报告）",
+            variable=self._nsfw_mode_var,
+            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
+            activebackground=PANEL, activeforeground="#f59e0b"
+        )
+        self._nsfw_cb.pack(anchor="w", padx=10, pady=1)
 
         ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
 
@@ -1652,6 +1904,8 @@ class MoeFaceApp:
         self._stop_evt.clear()
 
         def _load_and_run():
+            from modules.base import AIResultCollection
+
             db = self._database
             db_name = self._db_name
             if suggested != db_name or not db:
@@ -1666,8 +1920,37 @@ class MoeFaceApp:
                 self._set_busy(False)
                 return
 
+            # ── AI 模块配置 ────────────────────────────────────────────
+            enable_emotion = self._emotion_mode_var.get()
+            enable_speech = self._speech_mode_var.get()
+            enable_nsfw = self._nsfw_mode_var.get()
+            has_ai_modules = enable_emotion or enable_speech or enable_nsfw
+
+            if has_ai_modules:
+                light = not enable_speech  # 如果不需要语音，轻量加载
+                if not _ensure_ai_modules(light=light, log_fn=self._log):
+                    self._log("⚠️ AI 模块加载失败，跳过增强功能")
+                    enable_emotion = enable_speech = enable_nsfw = False
+                    has_ai_modules = False
+
+            # ── 结果收集器 ─────────────────────────────────────────────
+            ai_results = AIResultCollection(path, {
+                "emotion": enable_emotion,
+                "speech": enable_speech,
+                "nsfw": enable_nsfw,
+            })
+
             mn = self._min_neighbors_var.get()
             body_mode = self._body_mode_var.get()
+
+            def _ai_done():
+                """主线处理完成后的 AI 回调"""
+                # 保存 JSON 结果
+                if len(ai_results) > 0:
+                    out_base = Path(path).stem
+                    out_dir = Path(path).parent
+                    save_analysis_result(ai_results, str(out_dir / out_base), self._log)
+                self._set_busy(False)
 
             if suffix in IMAGE_EXTS:
                 self._log(f"\n🖼  图片: {path}")
@@ -1685,6 +1968,8 @@ class MoeFaceApp:
             elif suffix in VIDEO_EXTS:
                 self._log(f"\n🎬  视频: {path}")
                 out = self._out_var.get().strip() or None
+
+                # 运行主识别
                 process_video_file(
                     source=path,
                     database=db,
@@ -1697,6 +1982,11 @@ class MoeFaceApp:
                     preview_fn=self._show_frame_cv,
                     stop_event=self._stop_evt,
                     done_fn=lambda: self._set_busy(False),
+                    # ── AI 增强模块参数 ────────────────────────────────
+                    enable_emotion=enable_emotion,
+                    enable_speech=enable_speech,
+                    enable_nsfw=enable_nsfw,
+                    ai_results=ai_results,
                 )
             else:
                 self._log(f"⚠️  不支持的文件格式: {suffix}")
@@ -1864,6 +2154,8 @@ class MoeFaceCLI:
         self._console_height = 0
         self._last_pct = -1.0
         self._last_eta_str = ""
+        # ── AI 模块状态 ────────────────────────────────────────────────
+        self._ai_collection = None
 
     def _log(self, msg: str, level: str = "info"):
         """带颜色的日志输出"""
@@ -1950,6 +2242,27 @@ class MoeFaceCLI:
         
         CLIColors.p(f"\n  {CLIColors.SUCCESS}✨ 已加载 {len(self.db)} 个角色特征，就绪~ ✨{CLIColors.RESET}")
 
+        # ── AI 模块初始化（如需）───────────────────────────────────────
+        enable_emotion = self.args.get("emotion", False)
+        enable_speech = self.args.get("speech", False)
+        enable_nsfw = self.args.get("nsfw", False)
+        self._has_ai = enable_emotion or enable_speech or enable_nsfw
+
+        if self._has_ai:
+            from modules.base import AIResultCollection
+            self._ai_collection = AIResultCollection(
+                self.args.get("source", "cli_input"),
+                {"emotion": enable_emotion, "speech": enable_speech, "nsfw": enable_nsfw},
+            )
+            self._header("③ AI 识别模块")
+            self._log(f"{'😊 情绪' if enable_emotion else ''}"
+                       f"{' 🎤 语音' if enable_speech else ''}"
+                       f"{' 🔞 NSFW' if enable_nsfw else ''}", "info")
+            light = not enable_speech
+            if not _ensure_ai_modules(light=light, log_fn=self._log):
+                self._log("⚠️ AI 模块加载失败，跳过增强功能", "warn")
+                self._has_ai = False
+
         source = self.args.get("source")
         output = self.args.get("output")
         camera = self.args.get("camera", False)
@@ -2032,10 +2345,51 @@ class MoeFaceCLI:
                 self.stats["found_names"][name] = \
                     self.stats["found_names"].get(name, 0) + 1
 
+        # ── AI 增强：情绪识别 ──────────────────────────────────────────
+        if self._has_ai and self.args.get("emotion", False) and _EMOTION_MODULE is not None:
+            self._log("😊 情绪识别中...")
+            try:
+                emotions = _EMOTION_MODULE.process_frame(img, timestamp=0.0)
+                if emotions:
+                    for emo in emotions:
+                        self._ai_collection.add(AIResult(
+                            module="emotion", event_type="face_emotion",
+                            timestamp=0.0, data=emo, confidence=emo["confidence"],
+                        ))
+                        bx, by, bw, bh = emo["bbox"]
+                        img = draw_chinese_text(
+                            img, f"[{emo['emotion_label']}] {emo['confidence']:.0%}",
+                            (bx, by + bh + 5), 14, (255, 200, 0)
+                        )
+                    self._log(f"  ✅ 检测到 {len(emotions)} 张人脸情绪")
+            except Exception as e:
+                self._log(f"  ⚠️ 情绪识别异常: {e}")
+
+        # ── AI 增强：NSFW 检测 ─────────────────────────────────────────
+        if self._has_ai and self.args.get("nsfw", False) and _NSFW_MODULE is not None:
+            self._log("🔞 NSFW 检测中...")
+            try:
+                nsfw_result = _NSFW_MODULE.process_frame(img, timestamp=0.0)
+                if nsfw_result:
+                    self._ai_collection.add(nsfw_result)
+                    nsfw_label = nsfw_result.data.get("label_cn", "未知")
+                    nsfw_score = nsfw_result.data.get("nsfw_score", 0.0)
+                    self._log(f"  {nsfw_label}: {nsfw_score:.1%}")
+                    img = draw_chinese_text(
+                        img, f"NSFW: {nsfw_label} ({nsfw_score:.1%})",
+                        (10, 30), 16, (255, 100, 100)
+                    )
+            except Exception as e:
+                self._log(f"  ⚠️ NSFW 检测异常: {e}")
+
         output = self.args.get("output")
         if output:
             cv2.imwrite(output, img)
             self._log(f"已保存标注图: {output}", "ok")
+
+        # 保存 AI 结果
+        if self._ai_collection and len(self._ai_collection) > 0:
+            save_analysis_result(self._ai_collection, path, self._log)
 
     def _run_video(self, source: str, output_path: str):
         """识别视频文件（同时人体框+骨骼 + 人脸识别）"""
@@ -2116,8 +2470,45 @@ class MoeFaceCLI:
                         if name:
                             self.stats["found_names"][name] = \
                                 self.stats["found_names"].get(name, 0) + 1
+                            # 收集画面角色时间线（供语音角色关联）
+                            if self._has_ai and self.args.get("speech", False):
+                                ts = frame_idx / fps if fps > 0 else 0.0
+                                if not hasattr(self, '_face_timeline') or self._face_timeline is None:
+                                    self._face_timeline = []
+                                self._face_timeline.append({
+                                    "timestamp": ts,
+                                    "names": [name],
+                                })
 
                     self.stats["processed"] += 1
+
+                # ── AI 增强：帧级情绪 + NSFW ──────────────────────────
+                if frame_idx % skip_frames == 0:
+                    timestamp = frame_idx / fps if fps > 0 else 0.0
+
+                    if self._has_ai and self.args.get("emotion", False) and _EMOTION_MODULE is not None:
+                        try:
+                            emotions = _EMOTION_MODULE.process_frame(frame, timestamp)
+                            for emo in emotions:
+                                self._ai_collection.add(AIResult(
+                                    module="emotion", event_type="face_emotion",
+                                    timestamp=timestamp, data=emo, confidence=emo["confidence"],
+                                ))
+                                bx, by, _, _ = emo["bbox"]
+                                frame = draw_chinese_text(
+                                    frame, f"{emo['emotion_label']}",
+                                    (bx, by - 12), 11, (255, 200, 0)
+                                )
+                        except Exception:
+                            pass
+
+                    if self._has_ai and self.args.get("nsfw", False) and _NSFW_MODULE is not None:
+                        try:
+                            nsfw_result = _NSFW_MODULE.process_frame(frame, timestamp)
+                            if nsfw_result:
+                                self._ai_collection.add(nsfw_result)
+                        except Exception:
+                            pass
 
                 if out:
                     out.write(frame)
@@ -2136,6 +2527,54 @@ class MoeFaceCLI:
             self._log("正在合并音频...")
             _add_audio(source, output_path, tmp_out)
             self._log(f"已保存: {output_path}", "ok")
+
+        # ── AI 增强：语音转文字 + 说话人分离 ────────────────────────────
+        if self._has_ai and self.args.get("speech", False) and _SPEECH_MODULE is not None:
+            self._log("🎤 语音转文字 + 说话人分离中...")
+            try:
+                known_speakers = None
+                if self.db:
+                    known_speakers = {}
+                    for i, name in enumerate(self.db.keys()):
+                        known_speakers[f"speaker_{i}"] = name
+
+                speech_results = _SPEECH_MODULE.process_video(
+                    video_path=source,
+                    language="auto",
+                    enable_diarization=True,
+                    known_speakers=None,
+                    log_fn=self._log,
+                    stop_event=self.stop_evt,
+                    face_timeline=getattr(self, '_face_timeline', None),
+                )
+                self._ai_collection.extend(speech_results.results)
+
+                utterances = [r for r in speech_results.results
+                              if r.get("event_type") == "utterance"]
+                self._log(f"  ✅ 共转录 {len(utterances)} 句话")
+                for utt in utterances[:5]:
+                    d = utt.get("data", {})
+                    self._log(f"  [{d.get('speaker_name','?')}] {d.get('text','')[:60]}")
+                if len(utterances) > 5:
+                    self._log(f"  ...还有 {len(utterances) - 5} 句")
+
+                # 语义 NSFW
+                if self.args.get("nsfw", False) and _NSFW_MODULE is not None:
+                    for utt in utterances[:]:
+                        d = utt.get("data", {})
+                        text = d.get("text", "")
+                        if text.strip():
+                            nsfw_text = _NSFW_MODULE.process_text(
+                                text=text, timestamp=d.get("start", 0.0), source="transcript",
+                            )
+                            if nsfw_text and nsfw_text.confidence > 0:
+                                self._ai_collection.add(nsfw_text)
+            except Exception as e:
+                self._log(f"  ⚠️ 语音识别异常: {e}")
+
+        # 保存 AI 结果
+        if self._ai_collection and len(self._ai_collection) > 0:
+            save_analysis_result(self._ai_collection, source, self._log)
 
     def _run_camera(self):
         """摄像头实时识别（同时人体框+骨骼 + 人脸识别）"""
@@ -2241,6 +2680,9 @@ class MoeFaceCLI:
   {CLIColors.LGREEN}--min-neighbors{CLIColors.RESET}检测灵敏度 1~10 (默认: 3)
   {CLIColors.LGREEN}--rebuild{CLIColors.RESET}      强制重建特征库
   {CLIColors.LGREEN}--body{CLIColors.RESET}         启用人体姿态检测（框+骨骼，同时识别人脸角色）
+  {CLIColors.LGREEN}--emotion{CLIColors.RESET}      😊 启用表情与情绪识别（实验性）
+  {CLIColors.LGREEN}--speech{CLIColors.RESET}       🎤 启用语音转文字+说话人分离（实验性）
+  {CLIColors.LGREEN}--nsfw{CLIColors.RESET}         🔞 启用 NSFW 内容检测（仅报告，实验性）
   {CLIColors.LGREEN}--list{CLIColors.RESET}         列出所有可用特征库
 
 {CLIColors.TITLE}示例:{CLIColors.RESET}
@@ -2248,6 +2690,8 @@ class MoeFaceCLI:
   {CLIColors.MAGENTA}python recognize.py --mode cli --camera --threshold 0.6 --body{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode cli --source 图片.jpg --output annotated.jpg --body{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --db-name 永雏塔菲 --body{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --emotion --nsfw --body{CLIColors.RESET}
+  {CLIColors.MAGENTA}python recognize.py --mode cli --source 视频.mp4 --speech --nsfw{CLIColors.RESET}
   {CLIColors.MAGENTA}python recognize.py --mode gui{CLIColors.RESET}
 """)
 
@@ -2323,6 +2767,22 @@ def _parse_args():
         action="store_true",
         help="启用人体姿态检测模式（绘制边界框+骨骼连线，同时识别人脸角色）"
     )
+    # ── AI 识别增强模块（2026-06-29 新增）─────────────────────────────
+    parser.add_argument(
+        "--emotion",
+        action="store_true",
+        help="😊 启用表情与情绪识别（实时检测面部情绪并标注变化节点）"
+    )
+    parser.add_argument(
+        "--speech",
+        action="store_true",
+        help="🎤 启用语音转文字 + 说话人分离（需安装 faster-whisper，首次运行会下载模型）"
+    )
+    parser.add_argument(
+        "--nsfw",
+        action="store_true",
+        help="🔞 启用 NSFW 内容检测（视觉+语义双通道，仅报告不屏蔽）"
+    )
     parser.add_argument(
         "--list", "-l",
         action="store_true",
@@ -2362,6 +2822,10 @@ if __name__ == "__main__":
             "camera":       args.camera,
             "camera_id":    args.camera_id,
             "body":         args.body,
+            # ── AI 模块标志 ────────────────────────────────────────
+            "emotion":      args.emotion,
+            "speech":       args.speech,
+            "nsfw":         args.nsfw,
         }
         cli = MoeFaceCLI(cli_args)
         try:

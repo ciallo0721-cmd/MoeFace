@@ -1,7 +1,8 @@
 /.workbuddy
-*.pyc
-*.pyc
 /__pycache__
-*.bat
-*.bat
 *.pyc
+*.bat
+*.onnx
+*.h5
+/models/whisper/
+/features/

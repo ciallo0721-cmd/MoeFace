@@ -9,3 +9,20 @@ beautifulsoup4>=4.9.0
 tkinterdnd2>=0.3.0
 moviepy>=1.0.3
 mediapipe>=0.10.0
+
+# ── AI 识别增强模块（2026-06-29 新增）─────────────────────────────────
+# 表情与情绪识别
+imgaug>=0.4.0                    # 图像增强
+
+# 语音转文字 + 说话人分离
+faster-whisper>=1.0.0            # 语音转录（基于 Whisper）
+librosa>=0.10.0                  # 音频特征提取
+scikit-learn>=1.0.0              # 说话人聚类
+
+# NSFW 内容检测
+# 可选：tensorflow 或 onnxruntime 用于视觉 NSFW 模型
+# pip install tensorflow          # 需要 TF 模型时
+# pip install onnxruntime         # 需要 ONNX 模型时
+
+# 开发辅助
+scipy>=1.7.0
