@@ -8,6 +8,13 @@ GUI 版本 (Tkinter) + CLI 版本 (终端图形化)
 """
 带"～(｡•́︿•̀｡)"是严重错误
 """
+# ── 抑制 MediaPipe 日志/遥测（必须在 import mediapipe 之前设置）──
+import os as _os
+_os.environ.setdefault('MEDIAPIPE_DISABLE_LOGGING', '1')
+_os.environ.setdefault('GLOG_minloglevel', '2')
+_os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+del _os
+
 import os
 import sys
 import json
@@ -82,6 +89,10 @@ FEATURES_DIR = BASE_DIR / "features"
 DATA_DIR     = BASE_DIR / "data"
 CNAME_PATH   = RESOURCE_DIR / "cname" / "name.json"
 DEFAULT_DB_NAME = "全部特征库"
+
+# ── 负面特征库 ──────────────────────────────────────────────────────────
+NEGATIVE_DIR        = DATA_DIR / "负面特征"
+NEGATIVE_THRESHOLD  = 0.30   # 负面样本匹配阈值
 
 # ── 新 .moe 文本格式的部位键名 ──────────────────────────────────────────
 FEATURE_KEYS = ["eye", "eye2", "nose", "mouth", "head",
@@ -165,13 +176,14 @@ def _safe_filename(name: str) -> str:
     return "".join(c for c in name if c.isalnum() or c in keep or "\u4e00" <= c <= "\u9fff")
 
 
-def save_database_to_moe(database: dict, db_name: str):
+def save_database_to_moe(database: dict, db_name: str, negative_db: dict = None):
     """
     保存特征库为自研 .moe 文本格式
     格式：("角色名"{key1:val1:key2:val2:...keyN:valN:}"角色名2"{...})
     其中 val 为逗号分隔的浮点数（特征向量）
+    若 negative_db 不为空，额外写入 "负面_<类别>" 条目（仅包含 head 键）
     """
-    if not database:
+    if not database and not negative_db:
         return None
     import numpy as np
     safe = _safe_filename(db_name)
@@ -179,15 +191,24 @@ def save_database_to_moe(database: dict, db_name: str):
     moe_path.parent.mkdir(parents=True, exist_ok=True)
 
     chunks = []
-    for name, parts in database.items():
-        content_parts = []
-        for key in FEATURE_KEYS:
-            if key in parts and isinstance(parts[key], np.ndarray):
-                vec_str = ",".join(f"{v:.10f}" for v in parts[key])
-                content_parts.append(f"{key}:{vec_str}")
-        content = ":".join(content_parts)
-        # 加 trailing colon 以匹配格式规范
-        chunks.append(f'"{name}"{{{content}:}}')
+    # 写入正面角色特征
+    if database:
+        for name, parts in database.items():
+            content_parts = []
+            for key in FEATURE_KEYS:
+                if key in parts and isinstance(parts[key], np.ndarray):
+                    vec_str = ",".join(f"{v:.10f}" for v in parts[key])
+                    content_parts.append(f"{key}:{vec_str}")
+            content = ":".join(content_parts)
+            chunks.append(f'"{name}"{{{content}:}}')
+
+    # 写入负面特征（带 "负面_" 前缀，仅使用 head 键）
+    if negative_db:
+        NEG_PREFIX = "负面_"
+        for cat, emb in negative_db.items():
+            if isinstance(emb, np.ndarray):
+                vec_str = ",".join(f"{v:.10f}" for v in emb)
+                chunks.append(f'"{NEG_PREFIX}{cat}"{{head:{vec_str}:}}')
 
     all_text = "(" + "".join(chunks) + ")"
     moe_path.write_text(all_text, encoding="utf-8")
@@ -260,6 +281,150 @@ def load_database_from_moe(db_name: str):
     except Exception as e:
         warnings.warn(f"(｡•́︿•̀｡),主人,加载 .moe 特征库失败了: {e}")
         return None
+
+
+# ── 负面特征库（非人脸样板）───────────────────────────────────────────────
+def _extract_full_image_embedding(img_bgr):
+    """
+    将整张 BGR 图像缩放至 160x160 后提取 FaceNet 512 维嵌入，
+    不经过动漫人脸检测，适用于负面样本/非人脸样板。
+    """
+    import cv2, torch
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    img_rsz = cv2.resize(img_rgb, (160, 160))
+    tensor = (torch.tensor(img_rsz).permute(2, 0, 1)
+              .float().unsqueeze(0).to(_device) / 255.0)
+    with torch.no_grad():
+        return _resnet(tensor).cpu().numpy().flatten()
+
+
+def build_negative_database(log_fn=print, stop_event=None):
+    """
+    从 data/负面特征/ 构建负面样本特征库。
+    每个子文件夹为一个类别（真人、车、衣服…），
+    图片不经过动漫人脸检测，直接整图提取 FaceNet 嵌入后按类别聚合平均。
+    返回 {类别名: 512-dim ndarray}。
+    """
+    import cv2, numpy as np
+    if not _ensure_models(log_fn):
+        log_fn("❌ 模型未就绪，无法构建负面特征库")
+        return None
+
+    if not NEGATIVE_DIR.exists():
+        log_fn("⚠️ 负面特征目录不存在喵~ 暂时跳过")
+        return {}
+
+    database = {}
+    total = 0
+    categories = sorted(d for d in NEGATIVE_DIR.iterdir() if d.is_dir() and not d.name.startswith("_"))
+
+    if not categories:
+        log_fn("⚠️ 负面特征目录下没有类别子文件夹喵~")
+        return {}
+
+    log_fn(f"📁 扫描到 {len(categories)} 个负面类别: {', '.join(d.name for d in categories)}")
+
+    for subdir in categories:
+        if stop_event and stop_event.is_set():
+            break
+
+        category = subdir.name
+        imgs = sorted(
+            p for p in subdir.iterdir()
+            if p.suffix.lower() in ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
+        )
+        if not imgs:
+            log_fn(f"  ⚠️ [{category}] 空文件夹，跳过")
+            continue
+
+        embeddings = []
+        count = len(imgs)
+        log_fn(f"  🔄 [{category}] 处理 {count} 张图...")
+
+        for idx, img_path in enumerate(imgs):
+            if stop_event and stop_event.is_set():
+                break
+            try:
+                with open(img_path, "rb") as f:
+                    data = np.frombuffer(f.read(), dtype=np.uint8)
+                img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+                if img is None:
+                    log_fn(f"    ⚠️ [{category}] 无法解码: {img_path.name}")
+                    continue
+                emb = _extract_full_image_embedding(img)
+                embeddings.append(emb)
+                total += 1
+            except Exception as e:
+                log_fn(f"    ⚠️ [{category}] 读取失败 {img_path.name}: {e}")
+
+        if embeddings:
+            database[category] = np.mean(embeddings, axis=0).astype(np.float32)
+            log_fn(f"  ✅ [{category}] {len(embeddings)}/{count} 张有效，特征聚合完成")
+        else:
+            log_fn(f"  ⚠️ [{category}] 所有图片无效，跳过")
+
+    log_fn(f"✅ 负面特征库构建完成：{len(database)} 个类别，共 {total} 张有效图")
+    return database
+
+
+def save_negative_database(database: dict, db_name: str):
+    """
+    将负面特征库保存到指定 .moe 文件中（追加写入）。
+    以 "负面_" 前缀区分，负面条目仅含 head 键。
+    """
+    # 加载已有的正面数据库，加上负面特征一起保存
+    existing = load_database_from_moe(db_name) or {}
+    # 从 existing 中过滤掉已有的"负面_"条目
+    positive_db = {k: v for k, v in existing.items() if not k.startswith("负面_")}
+    save_database_to_moe(positive_db, db_name, negative_db=database)
+    return True
+
+
+def load_negative_database(db_name: str, log_fn=print):
+    """
+    从 .moe 文件中加载负面特征库（提取 "负面_" 前缀的条目）。
+    返回 {类别名: 512-dim ndarray} 或 None。
+    """
+    combined = load_database_from_moe(db_name)
+    if combined is None:
+        return None
+    negative = {}
+    for name, parts in combined.items():
+        if name.startswith("负面_") and "head" in parts:
+            cat = name[3:]  # 去掉 "负面_" 前缀
+            negative[cat] = parts["head"]
+    return negative or None
+
+
+def get_or_build_negative_database(db_name="全部特征库", force_rebuild=False, log_fn=print, stop_event=None):
+    """
+    获取或构建负面特征库。
+    优先从 .moe 文件加载缓存；若强制重建则从 data/负面特征/ 重新提取。
+    返回 {类别名: 512-dim ndarray}。
+    """
+    if not NEGATIVE_DIR.exists():
+        log_fn("⚠️ 负面特征目录 data/负面特征/ 不存在喵~")
+        return {}
+
+    if not force_rebuild:
+        cached = load_negative_database(db_name, log_fn)
+        if cached is not None:
+            return cached
+
+    # 子文件夹检查
+    has_subdirs = any(
+        d.is_dir() and not d.name.startswith("_")
+        for d in NEGATIVE_DIR.iterdir()
+    )
+    if not has_subdirs:
+        log_fn("⚠️ data/负面特征/ 下没有类别文件夹喵~")
+        return {}
+
+    database = build_negative_database(log_fn, stop_event)
+    if database:
+        save_negative_database(database, db_name)
+        log_fn(f"✅ 负面特征库已缓存到 {db_name}.moe 喵~")
+    return database or {}
 
 
 # 保留 JSON 版本作为兼容备份（可选）
@@ -417,20 +582,22 @@ def _extract_face_embedding(face_rgb_img):
 
 def _extract_limb_embeddings(full_img_bgr, body_persons):
     """
-    从全身图像 + YOLO-Pose 检测结果提取肢体特征
+    从全身图像 + 128 关键点提取肢体特征（密集采样）
     返回 dict: {key: 512-dim embedding}
-    若无可用的肢体检测结果，返回空 dict
     """
     import cv2
     import numpy as np
 
-    LIMB_KP_MAP = {
-        "arm":  (5, 7),    # left_shoulder → left_elbow
-        "arm2": (6, 8),    # right_shoulder → right_elbow
-        "hand": (9,),      # left_wrist
-        "hand2": (10,),    # right_wrist
-        "leg":  (11, 13),  # left_hip → left_knee
-        "leg2": (12, 14),  # right_hip → right_knee
+    # 每个肢体部位对应 _BONE_SEGMENTS 的索引 → 128 关键点范围
+    # arm=左大臂(seg7), arm2=右大臂(seg9), hand=左前臂(seg8), hand2=右前臂(seg10),
+    # leg=左大腿(seg14), leg2=右大腿(seg16)
+    LIMB_SEG_IDX = {
+        "arm":  7,    # left_shoulder → left_elbow
+        "arm2": 9,    # right_shoulder → right_elbow
+        "hand": 8,    # left_elbow → left_wrist
+        "hand2":10,   # right_elbow → right_wrist
+        "leg":  14,   # left_hip → left_knee
+        "leg2": 16,   # right_hip → right_knee
     }
 
     if not body_persons:
@@ -438,16 +605,23 @@ def _extract_limb_embeddings(full_img_bgr, body_persons):
 
     h, w = full_img_bgr.shape[:2]
     results = {}
-    # 使用检测到的第一个人体
     _, _, _, _, kps = body_persons[0]
-    MAX_KPS = 17
 
-    for key, kp_indices in LIMB_KP_MAP.items():
+    for key, seg_idx in LIMB_SEG_IDX.items():
+        start, end = _bone_range(seg_idx)
         points = []
-        for idx in kp_indices:
+        for idx in range(start, end):
             if idx < len(kps) and kps[idx][2] > 0.5:
                 px = int(kps[idx][0] * w)
                 py = int(kps[idx][1] * h)
+                points.append((px, py))
+
+        # 也包含两端锚点
+        from_idx, to_idx, _ = _BONE_SEGMENTS[seg_idx]
+        for anc in (from_idx, to_idx):
+            if anc < len(kps) and kps[anc][2] > 0.5:
+                px = int(kps[anc][0] * w)
+                py = int(kps[anc][1] * h)
                 points.append((px, py))
 
         if not points:
@@ -455,22 +629,14 @@ def _extract_limb_embeddings(full_img_bgr, body_persons):
 
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
-        cx, cy = sum(xs) // len(xs), sum(ys) // len(ys)
 
-        # 单点（如 hand）用固定矩形, 两点用连线矩形+边距
-        MARGIN = 50
-        if len(points) == 1:
-            x1 = max(0, cx - MARGIN)
-            y1 = max(0, cy - MARGIN)
-            x2 = min(w, cx + MARGIN)
-            y2 = min(h, cy + MARGIN)
-        else:
-            x1 = max(0, min(xs) - 15)
-            y1 = max(0, min(ys) - 15)
-            x2 = min(w, max(xs) + 15)
-            y2 = min(h, max(ys) + 15)
+        # 密集点 → 更精确的包围盒
+        x1 = max(0, min(xs) - 10)
+        y1 = max(0, min(ys) - 10)
+        x2 = min(w, max(xs) + 10)
+        y2 = min(h, max(ys) + 10)
 
-        if (x2 - x1) < 30 or (y2 - y1) < 30:
+        if (x2 - x1) < 20 or (y2 - y1) < 20:
             continue
 
         region = full_img_bgr[y1:y2, x1:x2]
@@ -705,8 +871,10 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
         # 优先加载 .moe 格式
         db = load_database_from_moe(db_name)
         if db is not None:
-            log_fn(f"✅ 从 .moe 缓存加载特征库 [{db_name}]，共 {len(db)} 个角色")
-            return db, False
+            # 过滤掉"负面_"前缀的条目（它们由 get_or_build_negative_database 负责）
+            positive_db = {k: v for k, v in db.items() if not k.startswith("负面_")}
+            log_fn(f"✅ 从 .moe 缓存加载特征库 [{db_name}]，共 {len(positive_db)} 个角色")
+            return positive_db, False
         # 兼容旧版：尝试加载 .json
         db = load_database_from_json(db_name)
         if db is not None:
@@ -731,8 +899,11 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
         db = build_database(db_path, log_fn, progress_fn, stop_event)
 
     if db:
-        save_database_to_moe(db, db_name)
-        log_fn(f"✅ 特征库已缓存为 .moe 格式喵~，共 {len(db)} 个角色")
+        # ── 同步构建负面特征库，一并存入 .moe ────────────────────────
+        neg_db = build_negative_database(log_fn, stop_event) if NEGATIVE_DIR.exists() else {}
+        save_database_to_moe(db, db_name, negative_db=neg_db)
+        total_entries = len(db) + len(neg_db)
+        log_fn(f"✅ 特征库已缓存为 .moe 格式喵~，共 {len(db)} 个角色 + {len(neg_db)} 个负面类别")
     return db, True
 
 
@@ -742,13 +913,16 @@ def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6))
 
 def recognize_character(face_img, database: dict, threshold=0.45,
-                        full_img=None, body_persons=None):
+                        full_img=None, body_persons=None,
+                        negative_db=None, negative_threshold=NEGATIVE_THRESHOLD):
     """
-    多部位综合识别——同时对比面部 + 肢体特征
+    多部位综合识别——同时对比面部 + 肢体特征，并支持负面特征过滤
     face_img:  裁剪的人脸 RGB 图像
     database:  特征库（{name: {key: embedding}}）
     full_img:  完整 BGR 图像（用于提取肢体特征）
-    body_persons: YOLO-Pose 检测结果（用于提取肢体特征）
+    body_persons: 姿态检测结果（用于提取肢体特征）
+    negative_db: 负面特征库（{类别名: 512-dim embedding}），用于过滤非人脸误检测
+    negative_threshold: 负面匹配阈值，超过此值且高于角色匹配分则标记为"非人脸"
     返回 (name, score)
     """
     import numpy as np
@@ -791,6 +965,13 @@ def recognize_character(face_img, database: dict, threshold=0.45,
             if avg_score > best_score:
                 best_score, best_name = avg_score, name
 
+    # 4. 检查负面特征库（防止把非人脸误识别为角色）
+    if negative_db and face_emb is not None:
+        for neg_cat, neg_emb in negative_db.items():
+            neg_score = cosine_similarity(face_emb, neg_emb)
+            if neg_score > negative_threshold and neg_score > best_score:
+                return (f"非人脸({neg_cat})", neg_score)
+
     return (best_name, best_score) if best_score >= threshold else (None, best_score)
 
 
@@ -811,7 +992,7 @@ def draw_chinese_text(img, text, position, font_size=18, color=(0, 255, 0)):
         return img
 
 
-# ── 人体姿态检测（ONNX Runtime + YOLO Pose，兼容 Python 3.13）──────────
+# ── 人体姿态检测（Google MediaPipe Pose Landmarker）────────────────────
 
 COCO_KEYPOINT_NAMES = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
@@ -844,145 +1025,176 @@ BODY_KEYPOINTS = {
     "left_ankle": 15, "right_ankle": 16,
 }
 
-_onnx_pose_session = None
-_onnx_pose_ready = False
+# ── 128 关键点：17 个 COCO 基础点 + 111 个骨骼插值点 ─────────────────
+# (from_coco, to_coco, num_interpolated)
+_BONE_SEGMENTS = [
+    (0, 1, 3), (0, 2, 3), (1, 3, 4), (2, 4, 4),   # 面部
+    (5, 6, 4), (0, 5, 5), (0, 6, 4),               # 肩/颈
+    (5, 7, 8), (7, 9, 10),                          # 左臂
+    (6, 8, 8), (8, 10, 10),                         # 右臂
+    (5, 11, 6), (6, 12, 6), (11, 12, 4),            # 躯干
+    (11, 13, 8), (13, 15, 8),                       # 左腿
+    (12, 14, 8), (14, 16, 8),                       # 右腿
+]
 
-def _ensure_pose_engine(log_fn=print):
-    """确保 ONNX Runtime Pose 引擎已加载"""
-    global _onnx_pose_ready
-    if _onnx_pose_ready:
-        return True
+def _build_128_connections():
+    """生成 128 关键点骨骼连线（基础 17 点 + 每条骨骼的连续线段）"""
+    conns = list(BODY_CONNECTIONS)
+    idx = 17
+    for a, b, n in _BONE_SEGMENTS:
+        prev = a
+        for _ in range(n):
+            conns.append((prev, idx))
+            prev = idx
+            idx += 1
+        conns.append((prev, b))
+    return conns
+
+BODY_CONNECTIONS_128 = _build_128_connections()
+
+# ── 肢体部位 → 128 关键点索引范围（用于精确裁剪） ──
+# 各个部位的插值点在 128 数组中的 (start, end) 区间
+def _bone_range(seg_index):
+    """计算 _BONE_SEGMENTS[seg_index] 的插值点在 128 中的起止索引"""
+    offset = 17
+    for i in range(seg_index):
+        offset += _BONE_SEGMENTS[i][2]
+    return (offset, offset + _BONE_SEGMENTS[seg_index][2])
+
+# ── MediaPipe Pose Landmarker 全局单例 ──
+_mediapipe_landmarker = None
+
+def _get_pose_landmarker(log_fn=print):
+    """
+    获取 MediaPipe Pose Landmarker 单例（懒加载）
+    优先使用 pose_landmarker.task（全量），回退到 pose_landmarker_lite.task（轻量）
+    如果原文件无法被 MediaPipe 直接读取（已知 zip 兼容性问题），会自动重新打包
+    """
+    global _mediapipe_landmarker
+    if _mediapipe_landmarker is not None:
+        return _mediapipe_landmarker
+
     try:
-        import onnxruntime
-        _onnx_pose_ready = True
-        log_fn("✅ ONNX Runtime Pose 已就绪喵~")
-        return True
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
     except ImportError:
-        log_fn("❌ 未安装 onnxruntime，请运行: pip install onnxruntime")
-        return False
-
-def _get_pose_session(log_fn=print):
-    """创建并返回 ONNX Runtime YOLO Pose 推理会话"""
-    import onnxruntime
-
-    model_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        'yolo11n-pose.onnx'
-    )
-    if not os.path.exists(model_path):
-        log_fn("⬇️  首次运行，正在下载姿态检测模型（yolo11n-pose ONNX）...")
-        import urllib.request
-        url = 'https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-pose.onnx'
-        try:
-            urllib.request.urlretrieve(url, model_path)
-            log_fn(f"✅ 模型已保存: {model_path}")
-        except Exception:
-            log_fn("⏳ GitHub 下载失败，尝试镜像...")
-            url2 = 'https://gitee.com/mirrors_ultralytics/ultralytics-assets/releases/download/v8.3.0/yolo11n-pose.onnx'
-            try:
-                urllib.request.urlretrieve(url2, model_path)
-                log_fn(f"✅ 模型已保存（镜像）: {model_path}")
-            except Exception as e2:
-                log_fn(f"❌ 模型下载失败，请手动下载 yolo11n-pose.onnx 放到项目目录: {e2}")
-                return None
-
-    if os.path.getsize(model_path) < 1024 * 1024:
-        log_fn("❌ 模型文件损坏或不完整，请删除后重新下载")
-        os.unlink(model_path)
+        log_fn("❌ 未安装 mediapipe，请运行: pip install mediapipe")
         return None
 
-    session = onnxruntime.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-    return session
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 选模型：全量 > 轻量
+    model_path = os.path.join(base_dir, 'pose_landmarker.task')
+    if not os.path.exists(model_path):
+        model_path = os.path.join(base_dir, 'pose_landmarker_lite.task')
+        if not os.path.exists(model_path):
+            log_fn("❌ 未找到 pose_landmarker.task，请从 Google MediaPipe 下载放到项目目录")
+            return None
+
+    def _try_load(path):
+        """尝试用 MediaPipe 加载 task 文件"""
+        base_options = python.BaseOptions(model_asset_path=path)
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+        )
+        return vision.PoseLandmarker.create_from_options(options)
+
+    try:
+        _mediapipe_landmarker = _try_load(model_path)
+        log_fn(f"✅ MediaPipe Pose Landmarker 已就绪喵~（{os.path.basename(model_path)}）")
+        return _mediapipe_landmarker
+    except Exception as e:
+        err_msg = str(e)
+        if 'Unable to open zip archive' in err_msg or 'zip' in err_msg.lower():
+            # 已知兼容性问题：用 Python 重新打包后加载
+            repacked = os.path.join(base_dir, 'mp_pose_repacked.task')
+            try:
+                import zipfile
+                log_fn("🔧 检测到 zip 兼容性问题，正在重新打包模型...")
+                with zipfile.ZipFile(model_path, 'r') as zf:
+                    entries = [(n, zf.read(n)) for n in zf.namelist()]
+                with zipfile.ZipFile(repacked, 'w', zipfile.ZIP_STORED) as zf:
+                    for name, data in entries:
+                        zf.writestr(name, data)
+                _mediapipe_landmarker = _try_load(repacked)
+                log_fn(f"✅ MediaPipe Pose Landmarker 已就绪喵~（{os.path.basename(model_path)} → 重打包）")
+                return _mediapipe_landmarker
+            except Exception as e2:
+                log_fn(f"❌ 重打包也失败了: {e2}")
+                return None
+        else:
+            log_fn(f"❌ MediaPipe Pose Landmarker 加载失败: {e}")
+            return None
 
 def detect_body_pose(image_bgr, log_fn=print):
     """
-    检测单张图片中的人体姿态，返回列表，每个元素为:
+    使用 MediaPipe Pose Landmarker 检测人体姿态
+    返回列表，每个元素为:
         (x1, y1, x2, y2, keypoints)
-    其中 keypoints 是长度为 17 的列表，每个元素为 (x, y, conf) 归一化坐标
-    如果没有检测到人体，返回空列表
+    其中 keypoints 是 128 关键点数组：[x, y, conf] 归一化坐标
+    前 17 个 = COCO 标准点，后 111 个 = 沿骨骼插值的密集点
     """
-    if not _ensure_pose_engine(log_fn):
-        return []
     import cv2
-    import numpy as np
+
+    landmarker = _get_pose_landmarker(log_fn)
+    if landmarker is None:
+        return []
 
     h, w = image_bgr.shape[:2]
-    max_dim = 1280
-    scale = 1.0
-    if max(h, w) > max_dim:
-        scale = max_dim / max(h, w)
-        image_bgr = cv2.resize(image_bgr, (int(w * scale), int(h * scale)))
-        h, w = image_bgr.shape[:2]
 
-    session = _get_pose_session(log_fn)
-    if session is None:
-        return []
+    # MediaPipe 33 → COCO 17 基础关键点
+    MP_TO_COCO = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
 
-    img_size = 640
     img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-    shape = img_rgb.shape[:2]
-    r = min(img_size / shape[0], img_size / shape[1])
-    new_shape = (int(shape[1] * r), int(shape[0] * r))
-    pad_w = img_size - new_shape[0]
-    pad_h = img_size - new_shape[1]
-    top, left = pad_h // 2, pad_w // 2
+    from mediapipe import Image as MpImage, ImageFormat
+    mp_image = MpImage(image_format=ImageFormat.SRGB, data=img_rgb)
 
-    img_resized = cv2.resize(img_rgb, new_shape, interpolation=cv2.INTER_LINEAR)
-    img_padded = np.full((img_size, img_size, 3), 114, dtype=np.uint8)
-    img_padded[top:top + new_shape[1], left:left + new_shape[0]] = img_resized
-
-    blob = img_padded.astype(np.float32) / 255.0
-    blob = np.transpose(blob, (2, 0, 1))
-    blob = np.expand_dims(blob, 0)
-
-    input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: blob})
-
-    pred = outputs[0][0]  # (56, 8400)
-    pred = pred.T  # (8400, 56)
-
-    num_keypoints = 17
-    expected_cols = 4 + 1 + num_keypoints * 3
-
-    if pred.shape[1] >= expected_cols:
-        bboxes = pred[:, :4]   # cx, cy, w, h
-        confidences = pred[:, 4]
-        kps = pred[:, 5:5 + num_keypoints * 3].reshape(-1, num_keypoints, 3)
-    elif pred.shape[1] >= 4 + num_keypoints * 3:
-        bboxes = pred[:, :4]
-        confidences = pred[:, 4]
-        kps = pred[:, 5:5 + num_keypoints * 3].reshape(-1, num_keypoints, 3)
-    else:
-        log_fn("❌ 模型输出格式不匹配")
+    try:
+        detection_result = landmarker.detect(mp_image)
+    except Exception as e:
+        log_fn(f"⚠️ MediaPipe 推理失败: {e}")
         return []
 
-    mask = confidences > 0.25
-    if not mask.any():
+    if not detection_result.pose_landmarks:
         return []
 
     persons = []
-    for i in np.where(mask)[0]:
-        cx, cy, bw, bh = bboxes[i]
-        # 将中心点+宽高转换为左上右下坐标 (原图坐标)
-        x1 = (cx - bw/2 - left) / r
-        y1 = (cy - bh/2 - top) / r
-        x2 = (cx + bw/2 - left) / r
-        y2 = (cy + bh/2 - top) / r
-        # 限制在图像范围内
-        x1 = max(0, min(w, x1))
-        y1 = max(0, min(h, y1))
-        x2 = max(0, min(w, x2))
-        y2 = max(0, min(h, y2))
-        # 关键点反 letterbox
-        kps_norm = []
-        for kp in kps[i]:
-            kx = (kp[0] - left) / r / w
-            ky = (kp[1] - top) / r / h
-            kx = max(0.0, min(1.0, kx))
-            ky = max(0.0, min(1.0, ky))
-            kps_norm.append([kx, ky, float(kp[2])])
-        persons.append((int(x1), int(y1), int(x2), int(y2), kps_norm))
+    for pose_landmarks in detection_result.pose_landmarks:
+        # ── 1. 提取 COCO 17 基础点 ──
+        kps_base = []
+        for mp_idx in MP_TO_COCO:
+            lm = pose_landmarks[mp_idx]
+            kps_base.append([float(lm.x), float(lm.y), float(lm.visibility)])
+
+        # ── 2. 沿骨骼插值 111 个密集点 → 128 总计 ──
+        kps_128 = kps_base.copy()
+        for a, b, n in _BONE_SEGMENTS:
+            pa = kps_base[a]
+            pb = kps_base[b]
+            for t_idx in range(1, n + 1):
+                t = t_idx / (n + 1)
+                kps_128.append([
+                    pa[0] + (pb[0] - pa[0]) * t,
+                    pa[1] + (pb[1] - pa[1]) * t,
+                    min(pa[2], pb[2]),      # 两端都可见才可信
+                ])
+
+        # ── 3. 边界框（从 128 点计算） ──
+        xs = [k[0] for k in kps_128 if k[2] > 0.5]
+        ys = [k[1] for k in kps_128 if k[2] > 0.5]
+        if not xs:
+            xs = [k[0] for k in kps_base]
+            ys = [k[1] for k in kps_base]
+
+        pad_ratio = 0.05
+        x1 = int(max(0, (min(xs) - pad_ratio) * w))
+        y1 = int(max(0, (min(ys) - pad_ratio) * h))
+        x2 = int(min(w, (max(xs) + pad_ratio) * w))
+        y2 = int(min(h, (max(ys) + pad_ratio) * h))
+
+        persons.append((x1, y1, x2, y2, kps_128))
 
     return persons
 
@@ -995,8 +1207,8 @@ def draw_body_skeleton(image_bgr, persons,
                        point_radius=5,
                        show_labels=True):
     """
-    在图像上绘制人体矩形框 + 骨骼连线 + 关键点圆圈 + 标签
-    persons: list of (x1, y1, x2, y2, keypoints)
+    在图像上绘制人体矩形框 + 128 关键点骨骼连线 + COCO 17 锚点标签
+    persons: list of (x1, y1, x2, y2, keypoints_128)
     """
     import cv2
     h, w = image_bgr.shape[:2]
@@ -1005,21 +1217,28 @@ def draw_body_skeleton(image_bgr, persons,
         return image_bgr
 
     for (x1, y1, x2, y2, landmarks) in persons:
-        # 1. 绘制人体边界框
+        # 1. 人体边界框
         cv2.rectangle(image_bgr, (x1, y1), (x2, y2), bbox_color, bbox_thickness)
 
-        # 2. 画骨骼连线
-        for (idx1, idx2) in BODY_CONNECTIONS:
+        # 2. 骨骼连线（128 点版本，含插值段）
+        for (idx1, idx2) in BODY_CONNECTIONS_128:
             if idx1 >= len(landmarks) or idx2 >= len(landmarks):
                 continue
-            kp1 = landmarks[idx1]
-            kp2 = landmarks[idx2]
+            kp1, kp2 = landmarks[idx1], landmarks[idx2]
             if kp1[2] > 0.5 and kp2[2] > 0.5:
                 pt1 = (int(kp1[0] * w), int(kp1[1] * h))
                 pt2 = (int(kp2[0] * w), int(kp2[1] * h))
                 cv2.line(image_bgr, pt1, pt2, line_color, line_thickness)
 
-        # 3. 画关键点圆点
+        # 3. 插值点圆点（小点，不标注标签）
+        if len(landmarks) > 17:
+            for idx in range(17, len(landmarks)):
+                kp = landmarks[idx]
+                if kp[2] > 0.5:
+                    x, y = int(kp[0] * w), int(kp[1] * h)
+                    cv2.circle(image_bgr, (x, y), 2, point_color, -1)
+
+        # 4. COCO 17 锚点（大点 + 标签）
         for idx, label in BODY_KEYPOINT_LABELS.items():
             if idx >= len(landmarks):
                 continue
@@ -1028,15 +1247,7 @@ def draw_body_skeleton(image_bgr, persons,
                 x, y = int(kp[0] * w), int(kp[1] * h)
                 cv2.circle(image_bgr, (x, y), point_radius, point_color, -1)
                 cv2.circle(image_bgr, (x, y), point_radius + 1, line_color, 1)
-
-        # 4. 画中文标签（可选）
-        if show_labels:
-            for idx, label in BODY_KEYPOINT_LABELS.items():
-                if idx >= len(landmarks):
-                    continue
-                kp = landmarks[idx]
-                if kp[2] > 0.5:
-                    x, y = int(kp[0] * w), int(kp[1] * h)
+                if show_labels:
                     image_bgr = draw_chinese_text(
                         image_bgr, label, (x + 8, y - 8),
                         font_size=12, color=(255, 255, 255)
@@ -1058,7 +1269,7 @@ def _add_audio(src_video, out_video, tmp_video):
             MOVIEPY_AVAILABLE = False
 
     if not MOVIEPY_AVAILABLE:
-        shutil.move(tmp_video, out_video)
+        _safe_move(tmp_video, out_video)
         return
     try:
         from moviepy.video.io.VideoFileClip import VideoFileClip
@@ -1071,7 +1282,32 @@ def _add_audio(src_video, out_video, tmp_video):
             os.unlink(tmp_video)
     except Exception as e:
         warnings.warn(f"音频合并失败: {e}")
-        shutil.move(tmp_video, out_video)
+        # 确保 moviepy/ffmpeg 完全退出再移动文件（避免 [WinError 32] 文件占用）
+        _safe_move(tmp_video, out_video)
+
+
+def _safe_move(src, dst, retries=5, delay=0.5):
+    """带重试的安全文件移动（处理 ffmpeg 进程残留锁）"""
+    import time
+    for i in range(retries):
+        try:
+            if os.path.exists(dst):
+                os.unlink(dst)
+            shutil.move(src, dst)
+            return
+        except (PermissionError, OSError):
+            if i < retries - 1:
+                time.sleep(delay * (i + 1))  # 递增等待
+            else:
+                # 最后尝试：复制 + 删除原文件
+                try:
+                    shutil.copy2(src, dst)
+                    try:
+                        os.unlink(src)
+                    except OSError:
+                        pass
+                except Exception:
+                    warnings.warn(f"无法移动文件: {src} → {dst}")
 
 def process_image_file(source: str, database: dict, threshold=0.45,
                        min_neighbors=3, body_mode=False,
@@ -1079,7 +1315,9 @@ def process_image_file(source: str, database: dict, threshold=0.45,
                        stop_event=None,
                        # ── AI 模块参数 ──────────────────────────────────
                        enable_emotion=False, enable_nsfw=False,
-                       ai_results=None):
+                       ai_results=None,
+                       # ── 负面特征库 ────────────────────────────────────
+                       negative_db=None, negative_threshold=NEGATIVE_THRESHOLD):
     import cv2
     import numpy as np
     from modules.base import AIResult
@@ -1171,7 +1409,8 @@ def process_image_file(source: str, database: dict, threshold=0.45,
                 continue
             face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
             name, score = recognize_character(face_rgb, database, threshold,
-                                              full_img=img, body_persons=persons)
+                                              full_img=img, body_persons=persons,
+                                              negative_db=negative_db, negative_threshold=negative_threshold)
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
             txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
             img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
@@ -1192,7 +1431,9 @@ def process_video_file(source: str, database: dict, output_path=None,
                        stop_event: threading.Event = None, done_fn=None,
                        # ── AI 模块参数 ──────────────────────────────────
                        enable_emotion=False, enable_speech=False,
-                       enable_nsfw=False, ai_results=None):
+                       enable_nsfw=False, ai_results=None,
+                       # ── 负面特征库 ────────────────────────────────────
+                       negative_db=None, negative_threshold=NEGATIVE_THRESHOLD):
     import cv2
     from modules.base import AIResult
     cap = cv2.VideoCapture(source)
@@ -1205,6 +1446,18 @@ def process_video_file(source: str, database: dict, output_path=None,
     w     = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h     = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # 限制输出分辨率，防止 x264 编码器内存分配失败
+    MAX_DIM = 1920
+    out_w, out_h = w, h
+    if max(w, h) > MAX_DIM:
+        scale = MAX_DIM / max(w, h)
+        out_w, out_h = int(w * scale), int(h * scale)
+        # 确保偶数像素（避免某些编码器报错）
+        out_w -= out_w % 2
+        out_h -= out_h % 2
+        log_fn(f"⚠️ 原视频分辨率过大 ({w}×{h})，已限制输出为 ({out_w}×{out_h})")
+
     log_fn(f"视频信息: {w}×{h}  {fps:.1f}fps  共 {total} 帧")
     if body_mode:
         log_fn("🔍 同时开启: 人体姿态检测(框+骨骼) + 人脸角色识别")
@@ -1215,11 +1468,12 @@ def process_video_file(source: str, database: dict, output_path=None,
         tmp_dir.mkdir(exist_ok=True)
         tmp_fd, tmp_out = tempfile.mkstemp(suffix=".mp4", dir=str(tmp_dir))
         os.close(tmp_fd)
-        out = cv2.VideoWriter(tmp_out, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        out = cv2.VideoWriter(tmp_out, cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
 
     frame_idx  = 0
     found_names: set = set()
     persons = []  # 用于跨循环传递 body_persons
+    need_resize = (out_w != w or out_h != h)
     # ── 画面角色时间线（用于语音转文字角色关联）──────────────────────
     _face_timeline: list = []
 
@@ -1258,7 +1512,8 @@ def process_video_file(source: str, database: dict, output_path=None,
                         continue
                     face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
                     name, score = recognize_character(face_rgb, database, threshold,
-                                                      full_img=frame, body_persons=persons)
+                                                      full_img=frame, body_persons=persons,
+                                                      negative_db=negative_db, negative_threshold=negative_threshold)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
                     frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
@@ -1310,6 +1565,8 @@ def process_video_file(source: str, database: dict, output_path=None,
                 preview_fn(frame.copy())
 
             if out:
+                if need_resize:
+                    frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
                 out.write(frame)
             frame_idx += 1
 
@@ -1442,6 +1699,7 @@ class MoeFaceApp:
         # 状态
         self._database: dict   = {}
         self._db_name:  str    = ""
+        self._negative_db: dict = {}  # 负面特征库
         self._stop_evt: threading.Event = threading.Event()
         self._busy      = False
         self._preview_img = None
@@ -1797,6 +2055,12 @@ class MoeFaceApp:
             self._db_name  = db_name
             cnt = len(db)
             self._log(f"特征库就绪: {cnt} 个角色")
+            # ── 加载负面特征库 ────────────────────────────────────────
+            ndb = get_or_build_negative_database(log_fn=self._log)
+            self._negative_db = ndb
+            if ndb:
+                self._log(f"✅ 负面特征库就绪：{len(ndb)} 个类别")
+            # ──────────────────────────────────────────────────────────
             self._set_status(f"✅ 特征库已加载（{cnt} 角色）")
             def _done():
                 self._progress_bar["value"] = 100
@@ -1825,6 +2089,12 @@ class MoeFaceApp:
             self._database = db
             self._db_name  = db_name
             self._log(f"✅ 重建完成: {len(db)} 个角色")
+            # ── 重建负面特征库 ────────────────────────────────────────
+            ndb = get_or_build_negative_database(force_rebuild=True, log_fn=self._log)
+            self._negative_db = ndb
+            if ndb:
+                self._log(f"✅ 负面特征库已重建：{len(ndb)} 个类别")
+            # ──────────────────────────────────────────────────────────
             self._set_status(f"✅ 特征库已重建（{len(db)} 角色）")
             def _done():
                 self._progress_bar["value"] = 100
@@ -1914,6 +2184,12 @@ class MoeFaceApp:
                 db, _ = get_or_build_database(suggested, log_fn=self._log, stop_event=self._stop_evt)
                 self._database = db
                 self._db_name  = suggested
+                # ── 加载负面特征库 ────────────────────────────────────
+                ndb = get_or_build_negative_database(log_fn=self._log)
+                self._negative_db = ndb
+                if ndb:
+                    self._log(f"✅ 负面特征库已加载：{len(ndb)} 个类别")
+                # ──────────────────────────────────────────────────────
 
             if not db:
                 self._log("❌ 特征库为空，无法识别。请先建库或检查 ./data 文件夹")
@@ -1964,6 +2240,7 @@ class MoeFaceApp:
                     preview_fn=self._show_frame_cv,
                     stop_event=self._stop_evt,
                     done_fn=lambda: self._set_busy(False),
+                    negative_db=self._negative_db,
                 )
             elif suffix in VIDEO_EXTS:
                 self._log(f"\n🎬  视频: {path}")
@@ -1986,6 +2263,8 @@ class MoeFaceApp:
                     enable_emotion=enable_emotion,
                     enable_speech=enable_speech,
                     enable_nsfw=enable_nsfw,
+                    # ── 负面特征库 ────────────────────────────────────
+                    negative_db=self._negative_db,
                     ai_results=ai_results,
                 )
             else:
@@ -2148,6 +2427,7 @@ class MoeFaceCLI:
     def __init__(self, args):
         self.args      = args
         self.db        = {}
+        self.negative_db = {}  # 负面特征库（非人脸样板）
         self.stats     = {"total_frames": 0, "processed": 0,
                           "found_names": {}, "errors": 0}
         self.stop_evt  = threading.Event()
@@ -2234,6 +2514,14 @@ class MoeFaceCLI:
             log_fn=self._log,
             progress_fn=lambda cur, tot, elapsed=0, lbl="": self._progress(cur, tot, elapsed, lbl)
         )
+        
+        # ── 加载负面特征库 ────────────────────────────────────────────
+        self._header("① 加载负面特征库")
+        self.negative_db = get_or_build_negative_database(
+            force_rebuild=force_rebuild, log_fn=self._log
+        )
+        if self.negative_db:
+            self._log(f"✅ 负面特征库就绪：{len(self.negative_db)} 个类别")
         
         CLIColors.p("")
         if not self.db:
@@ -2336,7 +2624,8 @@ class MoeFaceCLI:
                 continue
             face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
             name, score = recognize_character(face_rgb, self.db, threshold,
-                                              full_img=img, body_persons=persons)
+                                              full_img=img, body_persons=persons,
+                                              negative_db=self.negative_db)
             tag = CLIColors.SUCCESS if name else CLIColors.MUTED
             self._log(f"  {tag}{name or '未知'}{CLIColors.RESET} "
                       f"{CLIColors.MUTED}({score:.2f}){CLIColors.RESET} "
@@ -2462,7 +2751,8 @@ class MoeFaceCLI:
                             continue
                         face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
                         name, score = recognize_character(face_rgb, self.db, threshold,
-                                                          full_img=frame, body_persons=persons)
+                                                          full_img=frame, body_persons=persons,
+                                                          negative_db=self.negative_db)
                         cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
                         frame = draw_chinese_text(frame,
                             f"{name or '?'} ({score:.2f})",
@@ -2620,7 +2910,8 @@ class MoeFaceCLI:
                         continue
                     face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
                     name, score = recognize_character(face_rgb, self.db, threshold,
-                                                      full_img=frame, body_persons=persons)
+                                                      full_img=frame, body_persons=persons,
+                                                      negative_db=self.negative_db)
                     cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
                     frame = draw_chinese_text(frame,
                         f"{name or '?'} ({score:.2f})",

@@ -18,11 +18,14 @@
 - `data/` — 各角色训练图片（每个角色一个子文件夹）
 - `features/` — .moe 文本格式特征库缓存
 - `json_to_moe.py` — 旧版 .json → 新版 .moe 转换工具
+- `pose_landmarker.task` / `pose_landmarker_lite.task` — MediaPipe 姿态检测模型（全量 30MB / 轻量 5.8MB）
+- `mp_pose_repacked.task` — 自动重打包的 MediaPipe 模型（解决 zip 兼容性，.gitignore 已忽略）
 
 ## .moe 特征库格式（2026-06-23 重构）
 
 - **格式**: `("角色名"{eye:浮点,...:eye2:...:leg2:...:}"角色名2"{...})`
-- **11 个部位键**: eye, eye2, nose, mouth, head（面部，共享 FaceNet 特征）, arm, arm2, hand, hand2, leg, leg2（肢体，从 YOLO-Pose 裁剪后用 FaceNet 提取）
+- **11 个部位键**: eye, eye2, nose, mouth, head（面部，共享 FaceNet 特征）, arm, arm2, hand, hand2, leg, leg2（肢体，从姿态检测裁剪后用 FaceNet 提取）
+- **姿态检测**: 2026-07-02 从 YOLO-Pose ONNX 替换为 Google MediaPipe Pose Landmarker（mp 0.10.35，33 关键点 → COCO 17 映射）
 - **识别算法**: 多部位加权平均余弦相似度（面部权重 1.5，肢体权重 1.0）
 - `:` 同时作为 key:val 分隔符和 pair 间分隔符
 - 旧二进制格式（魔数 "MOE"，单 512-dim 向量）已废弃

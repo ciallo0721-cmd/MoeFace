@@ -6,3 +6,4 @@
 *.h5
 /models/whisper/
 /features/
+mp_pose_repacked.task
