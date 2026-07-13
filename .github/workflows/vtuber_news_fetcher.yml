@@ -2,7 +2,7 @@ name: VTuber News Fetcher
 
 on:
   schedule:
-    - cron: '0 0,4,12 * * *'
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -48,8 +48,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          git diff --cached --quiet || git commit -m "🤖 Auto: 新增VTuber角色文件夹 $(date +'%Y-%m-%d')"
-          git push origin HEAD
+          if git diff --cached --quiet; then
+            echo "📭 无新增文件夹，跳过 push"
+          else
+            git commit -m "🤖 Auto: 新增VTuber角色文件夹 $(date +'%Y-%m-%d')"
+            git push origin HEAD
+          fi
 
       - name: Upload news report
         uses: actions/upload-artifact@v4
