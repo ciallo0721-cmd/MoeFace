@@ -658,15 +658,13 @@ def get_roles_from_dir(root_dir):
         role_name = os.path.basename(root_dir)
         return [(role_name, root_dir)]
     
-    # 情况3：目录为空或没有图片 - 自动将根目录名作为角色名创建文件夹
+    # 情况3：目录为空或没有图片 - 直接使用当前目录，不再创建嵌套子文件夹
     role_name = os.path.basename(root_dir)
     # 如果根目录名无效或为空，使用默认名称
     if not role_name or role_name == '':
         role_name = "默认角色"
-    role_path = os.path.join(root_dir, role_name)
-    os.makedirs(role_path, exist_ok=True)
-    print(f"目录为空，自动创建角色文件夹: {role_path}")
-    return [(role_name, role_path)]
+    print(f"目录为空，直接使用当前目录: {root_dir}")
+    return [(role_name, root_dir)]
 
 def crawl_all_roles(root_dir, max_images_per_role):
     if not os.path.exists(root_dir):
