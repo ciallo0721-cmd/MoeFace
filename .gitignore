@@ -7,3 +7,12 @@
 /models/whisper/
 /features/
 mp_pose_repacked.task
+
+# 构建输出
+/dist/
+/build/
+*.spec
+/temp/
+
+# 虚拟环境
+/.venv/
