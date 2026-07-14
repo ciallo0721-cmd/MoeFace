@@ -106,6 +106,9 @@ FEATURES_DIR.mkdir(exist_ok=True)
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
+import customtkinter as ctk
+from ui.theme import Colors, FONTS, apply_theme
+
 try:
     import tkinterdnd2 as tkdnd
     DND_AVAILABLE = True
@@ -992,6 +995,80 @@ def draw_chinese_text(img, text, position, font_size=18, color=(0, 255, 0)):
         return img
 
 
+# ── 现代化识别框绘制 ────────────────────────────────────────────────────────
+def _box_color_by_score(score: float):
+    """根据相似度返回 BGR 颜色"""
+    if score >= 0.80:
+        return (110, 231, 183)   # 成功绿 #6EE7B7
+    elif score >= 0.50:
+        return (102, 209, 255)   # 赛博蓝 #62D8FF
+    else:
+        return (168, 168, 200)   # 灰紫 #A8A8C8
+
+
+def draw_modern_recognition_box(img, x1, y1, x2, y2, name, score):
+    """绘制现代化 VTuber 风格识别框 + 标签气泡"""
+    import cv2
+    color = _box_color_by_score(score)
+
+    # 圆角矩形框（主框 + 发光外框效果）
+    overlay = img.copy()
+    alpha = 0.15
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+
+    # 顶部标签气泡（填充背景）
+    label = f"{name}" if name else "Unknown"
+    pct_text = f" {score:.0%}"
+    full_text = label + pct_text
+
+    # 用 PIL 绘制中文标签
+    from PIL import Image, ImageDraw, ImageFont
+    try:
+        img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        draw_ctx = ImageDraw.Draw(img_pil)
+        font = ImageFont.truetype(str(FONT_PATH), 16) if FONT_PATH.is_file() else ImageFont.load_default()
+
+        # 计算文字尺寸
+        bbox = draw_ctx.textbbox((0, 0), full_text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad = 6
+        ly = max(0, y1 - th - pad * 2)
+
+        # 背景 + 文字
+        draw_ctx.rectangle([x1, ly, x1 + tw + pad * 2, y1],
+                           fill=(color[2], color[1], color[0]))
+        draw_ctx.text((x1 + pad, ly + pad), full_text, font=font,
+                      fill=(18, 19, 26))  # 深色文字
+
+        # 相似度进度条（在标签下方）
+        bar_h = 3
+        bar_y = y1 - bar_h - 1
+        bar_w = (x2 - x1) * min(score, 1.0)
+        bar_color = (110, 231, 183) if score >= 0.80 else (
+            (102, 209, 255) if score >= 0.50 else (168, 168, 200))
+        draw_ctx.rectangle([x1, bar_y, x1 + int(bar_w), bar_y + bar_h],
+                           fill=(bar_color[2], bar_color[1], bar_color[0]))
+
+        img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    except Exception:
+        # 降级：OpenCV 纯英文绘制
+        cv2.rectangle(img, (x1, y1 - 24), (x1 + 180, y1), color, -1)
+        cv2.putText(img, full_text, (x1 + 4, y1 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (18, 19, 26), 1, cv2.LINE_AA)
+
+    return img
+
+
+def _is_valid_face_box(w: int, h: int) -> bool:
+    """过滤非人脸区域：宽高比 0.6~1.5，最小 30x30"""
+    if w < 30 or h < 30:
+        return False
+    ratio = w / h if h > 0 else 0
+    return 0.6 <= ratio <= 1.5
+
+
 # ── 人体姿态检测（Google MediaPipe Pose Landmarker）────────────────────
 
 COCO_KEYPOINT_NAMES = [
@@ -1310,7 +1387,7 @@ def _safe_move(src, dst, retries=5, delay=0.5):
                     warnings.warn(f"无法移动文件: {src} → {dst}")
 
 def process_image_file(source: str, database: dict, threshold=0.45,
-                       min_neighbors=3, body_mode=False,
+                       min_neighbors=5, body_mode=False,
                        log_fn=print, preview_fn=None, done_fn=None,
                        stop_event=None,
                        # ── AI 模块参数 ──────────────────────────────────
@@ -1401,6 +1478,8 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             if stop_event and stop_event.is_set():
                 log_fn("⏹ 已停止")
                 break
+            if not _is_valid_face_box(w, h):
+                continue
             x1 = max(0, x); y1 = max(0, y)
             x2 = min(img.shape[1], x + w)
             y2 = min(img.shape[0], y + h)
@@ -1411,10 +1490,10 @@ def process_image_file(source: str, database: dict, threshold=0.45,
             name, score = recognize_character(face_rgb, database, threshold,
                                               full_img=img, body_persons=persons,
                                               negative_db=negative_db, negative_threshold=negative_threshold)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
-            img = draw_chinese_text(img, txt, (x1, max(0, y1 - 25)), 18, (0, 255, 0))
-            log_fn(f"  {'✅' if name else '❓'} {txt}")
+            if not name or score < threshold:
+                continue
+            img = draw_modern_recognition_box(img, x1, y1, x2, y2, name, score)
+            log_fn(f"  {'✅' if name else '❓'} {name} ({score:.2f})")
 
         if preview_fn:
             preview_fn(img)
@@ -1425,7 +1504,7 @@ def process_image_file(source: str, database: dict, threshold=0.45,
 
 
 def process_video_file(source: str, database: dict, output_path=None,
-                       threshold=0.45, skip_frames=2, min_neighbors=3,
+                       threshold=0.45, skip_frames=2, min_neighbors=5,
                        body_mode=False,
                        log_fn=print, preview_fn=None,
                        stop_event: threading.Event = None, done_fn=None,
@@ -1504,6 +1583,8 @@ def process_video_file(source: str, database: dict, output_path=None,
                     minSize=(20, 20), maxSize=(800, 800)
                 )
                 for (x, y, fw, fh) in faces:
+                    if not _is_valid_face_box(fw, fh):
+                        continue
                     x1 = max(0, x); y1 = max(0, y)
                     x2 = min(frame.shape[1], x + fw)
                     y2 = min(frame.shape[0], y + fh)
@@ -1514,9 +1595,9 @@ def process_video_file(source: str, database: dict, output_path=None,
                     name, score = recognize_character(face_rgb, database, threshold,
                                                       full_img=frame, body_persons=persons,
                                                       negative_db=negative_db, negative_threshold=negative_threshold)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    txt = f"{name} ({score:.2f})" if name else f"Unknown ({score:.2f})"
-                    frame = draw_chinese_text(frame, txt, (x1, max(0, y1 - 25)), 16, (0, 255, 0))
+                    if not name or score < threshold:
+                        continue
+                    frame = draw_modern_recognition_box(frame, x1, y1, x2, y2, name, score)
                     if name:
                         found_names.add(name)
                         # 收集画面角色时间线（供语音角色关联使用）
@@ -1683,261 +1764,255 @@ VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".m4v"}
 
 
 class MoeFaceApp:
-    WIN_W, WIN_H = 1024, 768
+    WIN_W, WIN_H = 1100, 780
 
     def __init__(self):
+        apply_theme()
+        ctk.set_appearance_mode("dark")
+
         if DND_AVAILABLE:
             self.root = tkdnd.Tk()
         else:
             self.root = tk.Tk()
 
-        self.root.title("MoeFace — 动漫人脸识别系统")
+        self.root.title("MoeFace — AI Anime Face Recognition")
         self.root.geometry(f"{self.WIN_W}x{self.WIN_H}")
-        self.root.minsize(800, 600)
-        self.root.configure(bg="#1e1e2e")
+        self.root.minsize(900, 650)
+        self.root.configure(bg=Colors.BG)
 
         # 状态
         self._database: dict   = {}
         self._db_name:  str    = ""
-        self._negative_db: dict = {}  # 负面特征库
+        self._negative_db: dict = {}
         self._stop_evt: threading.Event = threading.Event()
         self._busy      = False
         self._preview_img = None
         self._models_ready = False
 
         self._auto_shutdown_var = tk.BooleanVar(value=False)
-        self._body_mode_var = tk.BooleanVar(value=False)  # 人体姿态检测模式
-        # ── AI 识别模块开关（2026-06-29 新增）─────────────────────────
-        self._emotion_mode_var = tk.BooleanVar(value=False)  # 情绪识别
-        self._speech_mode_var = tk.BooleanVar(value=False)   # 语音转文字
-        self._nsfw_mode_var = tk.BooleanVar(value=False)     # NSFW 检测
+        self._body_mode_var = tk.BooleanVar(value=False)
+        self._emotion_mode_var = tk.BooleanVar(value=False)
+        self._speech_mode_var = tk.BooleanVar(value=False)
+        self._nsfw_mode_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self._load_models_async()
 
-    # ── UI 构建 ────────────────────────────────────────────────────────────
+    # ── UI 构建 ────────────────────────────────────────────────
     def _build_ui(self):
         root = self.root
-        DARK   = "#1e1e2e"
-        PANEL  = "#2a2a3e"
-        ACCENT = "#7c3aed"
-        TEXT   = "#cdd6f4"
-        MUTED  = "#6c7086"
 
-        hdr = tk.Frame(root, bg=ACCENT, height=48)
+        # Header
+        hdr = ctk.CTkFrame(root, height=52, fg_color=Colors.CARD, corner_radius=0)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        tk.Label(hdr, text="  MoeFace  动漫人脸识别",
-                 font=("微软雅黑", 14, "bold"),
-                 bg=ACCENT, fg="white").pack(side="left", padx=16, pady=8)
 
-        self._status_lbl = tk.Label(hdr, text=" 正在初始化…",
-                                    font=("微软雅黑", 10),
-                                    bg=ACCENT, fg="#e9d5ff")
+        logo_frame = ctk.CTkFrame(hdr, fg_color="transparent")
+        logo_frame.pack(side="left", padx=16, pady=4)
+        ctk.CTkLabel(logo_frame, text="◉", font=("Segoe UI", 20),
+                     text_color=Colors.PRIMARY).pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(logo_frame, text="MoeFace",
+                     font=FONTS["title"], text_color=Colors.TEXT).pack(side="left")
+        ctk.CTkLabel(logo_frame, text="  AI Anime Vision",
+                     font=FONTS["small"], text_color=Colors.TEXT_MUTED).pack(side="left", padx=(4, 0))
+
+        self._status_lbl = ctk.CTkLabel(hdr, text=" 正在初始化…",
+                                        font=FONTS["body"], text_color=Colors.ACCENT)
         self._status_lbl.pack(side="right", padx=16)
 
-        body = tk.Frame(root, bg=DARK)
+        # Body
+        body = ctk.CTkFrame(root, fg_color=Colors.BG, corner_radius=0)
         body.pack(fill="both", expand=True)
 
-        left = tk.Frame(body, bg=PANEL, width=260)
-        left.pack(side="left", fill="y", padx=(8, 0), pady=8)
-        left.pack_propagate(False)
+        left = ctk.CTkScrollableFrame(body, width=250, fg_color=Colors.BG, corner_radius=0)
+        left.pack(side="left", fill="y", padx=(0, 0), pady=0)
 
-        right = tk.Frame(body, bg=DARK)
+        right = ctk.CTkFrame(body, fg_color=Colors.BG, corner_radius=0)
         right.pack(side="left", fill="both", expand=True, padx=8, pady=8)
 
-        self._build_left(left, PANEL, ACCENT, TEXT, MUTED)
-        self._build_right(right, DARK, PANEL, TEXT, MUTED)
+        self._build_left(left)
+        self._build_right(right)
 
-    def _lbl(self, parent, text, bg, fg, font=("微软雅黑", 9), **kw):
-        return tk.Label(parent, text=text, bg=bg, fg=fg, font=font, **kw)
+    def _build_card_header(self, parent, title):
+        """卡片区域标题行"""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=4, pady=(12, 4))
+        ctk.CTkLabel(row, text=title, font=FONTS["card_title"],
+                     text_color=Colors.PRIMARY).pack(side="left")
 
-    def _btn(self, parent, text, cmd, bg, fg="#ffffff", **kw):
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=bg, fg=fg, relief="flat",
-                         activebackground="#6d28d9", activeforeground="white",
-                         cursor="hand2", font=("微软雅黑", 9), **kw)
+    def _btn(self, parent, text, cmd, fg_color=Colors.CARD,
+             hover_color=None, border_width=1, border_color=None, **kw):
+        return ctk.CTkButton(
+            parent, text=text, command=cmd,
+            fg_color=fg_color,
+            hover_color=hover_color or Colors.CARD_HOVER,
+            border_width=border_width,
+            border_color=border_color or Colors.BORDER,
+            font=FONTS["body"], corner_radius=6, **kw
+        )
 
-    def _build_left(self, parent, PANEL, ACCENT, TEXT, MUTED):
-        pad = {"padx": 10, "pady": 4, "anchor": "w"}
+    def _build_left(self, parent):
+        pad = {"padx": 4, "pady": 2, "anchor": "w"}
 
-        self._lbl(parent, "特征库", PANEL, MUTED,
-                  font=("微软雅黑", 8)).pack(**pad)
+        # ── 🎯 识别源 ──
+        self._build_card_header(parent, "🎯 识别源")
+        self._open_btn = ctk.CTkButton(
+            parent, text=" 打开图片 / 视频",
+            command=self._open_file,
+            fg_color=Colors.PRIMARY, hover_color=Colors.PRIMARY_HOVER,
+            font=FONTS["body"], corner_radius=6
+        )
+        self._open_btn.pack(fill="x", padx=4, pady=2)
 
-        db_frame = tk.Frame(parent, bg=PANEL)
-        db_frame.pack(fill="x", padx=10, pady=2)
+        # ── 🧠 AI 增强 ──
+        self._build_card_header(parent, "🧠 AI 增强")
+        ai_frame = ctk.CTkFrame(parent, fg_color=Colors.CARD, corner_radius=6)
+        ai_frame.pack(fill="x", padx=4, pady=4)
 
+        self._emotion_cb = ctk.CTkCheckBox(
+            ai_frame, text="😊 情绪识别", variable=self._emotion_mode_var,
+            font=FONTS["body"], text_color=Colors.TEXT_MUTED, fg_color=Colors.PRIMARY)
+        self._emotion_cb.pack(anchor="w", padx=8, pady=(8, 2))
+
+        self._speech_cb = ctk.CTkCheckBox(
+            ai_frame, text="🎤 语音转文字", variable=self._speech_mode_var,
+            font=FONTS["body"], text_color=Colors.TEXT_MUTED, fg_color=Colors.PRIMARY)
+        self._speech_cb.pack(anchor="w", padx=8, pady=2)
+
+        self._nsfw_cb = ctk.CTkCheckBox(
+            ai_frame, text="🔞 NSFW 检测", variable=self._nsfw_mode_var,
+            font=FONTS["body"], text_color=Colors.TEXT_MUTED, fg_color=Colors.PRIMARY)
+        self._nsfw_cb.pack(anchor="w", padx=8, pady=(2, 8))
+
+        # ── ⚙ 识别设置 ──
+        self._build_card_header(parent, "⚙ 识别设置")
+
+        # 特征库选择
         self._db_var = tk.StringVar(value=DEFAULT_DB_NAME)
         db_names = [DEFAULT_DB_NAME] + sorted(scan_role_folders())
-        self._db_combo = ttk.Combobox(db_frame, textvariable=self._db_var,
-                                      values=db_names, state="readonly", width=20)
-        self._db_combo.pack(side="left", fill="x", expand=True)
+        self._db_combo = ctk.CTkOptionMenu(
+            parent, values=db_names, variable=self._db_var,
+            font=FONTS["body"], fg_color=Colors.BORDER,
+            button_color=Colors.PRIMARY, button_hover_color=Colors.PRIMARY_HOVER,
+            corner_radius=6)
+        self._db_combo.pack(fill="x", padx=4, pady=2)
 
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TCombobox",
-                         fieldbackground="#2a2a3e", background="#2a2a3e",
-                         foreground="#cdd6f4", bordercolor="#7c3aed",
-                         arrowcolor="#cdd6f4")
-
-        self._progress_frame = tk.Frame(parent, bg=PANEL)
-        self._progress_frame.pack(fill="x", padx=10, pady=(4, 2))
-        self._progress_label = self._lbl(self._progress_frame, 
-                                          "等待加载特征库...", PANEL, MUTED,
-                                          font=("微软雅黑", 8))
-        self._progress_label.pack(anchor="w")
-        self._progress_bar = ttk.Progressbar(self._progress_frame, 
-                                              length=200, mode="determinate",
-                                              style="Moe.Horizontal.TProgressbar")
-        self._progress_bar.pack(fill="x", pady=2)
-        self._progress_bar["maximum"] = 100
-        self._progress_bar["value"] = 0
-
-        self._rebuild_btn = self._btn(parent, " 重建特征库", self._rebuild_db,
-                                      ACCENT, state="disabled")
-        self._rebuild_btn.pack(fill="x", padx=10, pady=(4, 2))
-        self._load_btn = self._btn(parent, " 加载特征库", self._load_db_now,
-                                   "#374151", state="disabled")
-        self._load_btn.pack(fill="x", padx=10, pady=2)
-
-        self._auto_shutdown_cb = tk.Checkbutton(
-            parent, text="训练完成后自动关机", variable=self._auto_shutdown_var,
-            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
-            activebackground=PANEL, activeforeground=TEXT
-        )
-        self._auto_shutdown_cb.pack(anchor="w", padx=10, pady=2)
-
-        self._body_mode_cb = tk.Checkbutton(
-            parent, text="🧍 人体姿态检测模式",
-            variable=self._body_mode_var,
-            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
-            activebackground=PANEL, activeforeground="#7c3aed"
-        )
-        self._body_mode_cb.pack(anchor="w", padx=10, pady=2)
-
-        # ── AI 识别模块复选框 ──────────────────────────────────────────
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=4)
-        self._lbl(parent, "AI 识别增强（实验性功能）", PANEL, MUTED,
-                  font=("微软雅黑", 8)).pack(**pad)
-
-        self._emotion_cb = tk.Checkbutton(
-            parent, text="😊 表情 & 情绪识别",
-            variable=self._emotion_mode_var,
-            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
-            activebackground=PANEL, activeforeground="#f59e0b"
-        )
-        self._emotion_cb.pack(anchor="w", padx=10, pady=1)
-
-        self._speech_cb = tk.Checkbutton(
-            parent, text="🎤 语音转文字 + 说话人分离",
-            variable=self._speech_mode_var,
-            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
-            activebackground=PANEL, activeforeground="#f59e0b"
-        )
-        self._speech_cb.pack(anchor="w", padx=10, pady=1)
-
-        self._nsfw_cb = tk.Checkbutton(
-            parent, text="🔞 NSFW 内容检测（仅报告）",
-            variable=self._nsfw_mode_var,
-            bg=PANEL, fg=TEXT, selectcolor=PANEL, font=("微软雅黑", 9),
-            activebackground=PANEL, activeforeground="#f59e0b"
-        )
-        self._nsfw_cb.pack(anchor="w", padx=10, pady=1)
-
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
-
-        self._lbl(parent, "识别阈值", PANEL, MUTED,
-                  font=("微软雅黑", 8)).pack(**pad)
-        th_frame = tk.Frame(parent, bg=PANEL)
-        th_frame.pack(fill="x", padx=10, pady=2)
+        # 阈值
         self._threshold_var = tk.DoubleVar(value=0.45)
-        th_scale = tk.Scale(th_frame, from_=0.1, to=0.95, resolution=0.01,
-                            orient="horizontal", variable=self._threshold_var,
-                            bg=PANEL, fg=TEXT, highlightthickness=0,
-                            troughcolor="#374151", activebackground=ACCENT)
-        th_scale.pack(fill="x")
-        self._th_label = self._lbl(th_frame,
-                                   f"当前: {self._threshold_var.get():.2f}",
-                                   PANEL, MUTED, font=("微软雅黑", 8))
-        self._th_label.pack(anchor="e")
-        self._threshold_var.trace_add("write", lambda *_: self._th_label.config(
-            text=f"当前: {self._threshold_var.get():.2f}"))
+        self._build_slider(parent, "阈值", self._threshold_var, 0.1, 0.95, 0.01)
 
-        self._lbl(parent, "视频跳帧（每N帧识别一次）", PANEL, MUTED,
-                  font=("微软雅黑", 8)).pack(**pad)
+        # 灵敏度 (默认 5，减少误检)
+        self._min_neighbors_var = tk.IntVar(value=5)
+        self._build_slider(parent, "灵敏度", self._min_neighbors_var, 1, 10, 1)
+
+        # 跳帧
         self._skip_var = tk.IntVar(value=2)
+        self._build_slider(parent, "跳帧", self._skip_var, 1, 30, 1)
 
-        def _validate_int(val):
-            return val.isdigit() or val == ""
-        vcmd = parent.register(_validate_int)
-        tk.Spinbox(parent, from_=1, to=30, textvariable=self._skip_var,
-                   validate="key", validatecommand=(vcmd, "%P"),
-                   bg="#374151", fg=TEXT, buttonbackground="#374151",
-                   relief="flat", font=("微软雅黑", 9), width=6
-                   ).pack(padx=10, pady=2, anchor="w")
+        # 人体姿态
+        self._body_mode_cb = ctk.CTkCheckBox(
+            parent, text="🧍 人体姿态检测", variable=self._body_mode_var,
+            font=FONTS["body"], text_color=Colors.TEXT_MUTED, fg_color=Colors.PRIMARY)
+        self._body_mode_cb.pack(anchor="w", padx=4, pady=2)
 
-        self._lbl(parent, "检测灵敏度（越大误检越少）", PANEL, MUTED,
-                  font=("微软雅黑", 8)).pack(**pad)
-        mn_frame = tk.Frame(parent, bg=PANEL)
-        mn_frame.pack(fill="x", padx=10, pady=2)
-        self._min_neighbors_var = tk.IntVar(value=3)
-        tk.Scale(mn_frame, from_=1, to=10, resolution=1,
-                 orient="horizontal", variable=self._min_neighbors_var,
-                 bg=PANEL, fg=TEXT, highlightthickness=0,
-                 troughcolor="#374151", activebackground=ACCENT
-                 ).pack(fill="x")
-        self._mn_label = self._lbl(mn_frame,
-                                   f"当前: {self._min_neighbors_var.get()}",
-                                   PANEL, MUTED, font=("微软雅黑", 8))
-        self._mn_label.pack(anchor="e")
-        self._min_neighbors_var.trace_add("write", lambda *_: self._mn_label.config(
-            text=f"当前: {self._min_neighbors_var.get()}"))
-
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
-
-        self._lbl(parent, "保存识别视频（可选）", PANEL, MUTED,
-                  font=("微软雅黑", 8)).pack(**pad)
-        out_frame = tk.Frame(parent, bg=PANEL)
-        out_frame.pack(fill="x", padx=10, pady=2)
+        # ── 💾 输出 ──
+        self._build_card_header(parent, "💾 输出（可选）")
+        out_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        out_frame.pack(fill="x", padx=4, pady=2)
         self._out_var = tk.StringVar()
-        tk.Entry(out_frame, textvariable=self._out_var,
-                 bg="#374151", fg=TEXT, relief="flat",
-                 insertbackground=TEXT, font=("微软雅黑", 9)
-                 ).pack(side="left", fill="x", expand=True)
-        self._btn(out_frame, "…", self._pick_output, "#374151",
-                  width=3).pack(side="left", padx=2)
+        ctk.CTkEntry(out_frame, textvariable=self._out_var,
+                     placeholder_text="保存路径...",
+                     font=FONTS["body"], corner_radius=6).pack(
+                     side="left", fill="x", expand=True)
+        ctk.CTkButton(out_frame, text="⋯", command=self._pick_output,
+                      width=30, corner_radius=6,
+                      fg_color=Colors.BORDER, hover_color=Colors.CARD_HOVER,
+                      font=FONTS["body"]).pack(side="left", padx=4)
 
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
+        # ── ⚡ 操作 ──
+        self._build_card_header(parent, "⚡ 操作")
+        self._rebuild_btn = self._btn(parent, "重建特征库", self._rebuild_db,
+                                      fg_color=Colors.CARD)
+        self._rebuild_btn.pack(fill="x", padx=4, pady=2)
 
-        self._open_btn = self._btn(parent, "  打开图片/视频", self._open_file,
-                                   ACCENT, state="disabled")
-        self._open_btn.pack(fill="x", padx=10, pady=2)
-        self._stop_btn = self._btn(parent, "⏹  停止处理", self._stop_processing,
-                                   "#dc2626", state="disabled")
-        self._stop_btn.pack(fill="x", padx=10, pady=2)
+        self._load_btn = self._btn(parent, "加载特征库", self._load_db_now,
+                                   fg_color=Colors.CARD)
+        self._load_btn.pack(fill="x", padx=4, pady=2)
 
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=10, pady=8)
+        self._stop_btn = ctk.CTkButton(
+            parent, text="⏹ 停止",
+            command=self._stop_processing,
+            fg_color=Colors.ERROR, hover_color="#E55A78",
+            font=FONTS["body"], corner_radius=6
+        )
+        self._stop_btn.pack(fill="x", padx=4, pady=2)
 
-        self._btn(parent, " 管理角色别名", self._open_alias_editor,
-                  "#374151").pack(fill="x", padx=10, pady=2)
-        self._btn(parent, " 清空日志", self._clear_log,
-                  "#374151").pack(fill="x", padx=10, pady=2)
+        # 进度条
+        self._progress_bar = ctk.CTkProgressBar(parent, mode="determinate", width=220)
+        self._progress_bar.pack(fill="x", padx=4, pady=(8, 0))
+        self._progress_bar.set(0)
+        self._progress_label = ctk.CTkLabel(parent, text="等待加载特征库...",
+                                            font=FONTS["small"],
+                                            text_color=Colors.TEXT_MUTED)
+        self._progress_label.pack(anchor="w", padx=4, pady=2)
 
-    def _build_right(self, parent, DARK, PANEL, TEXT, MUTED):
-        preview_frame = tk.Frame(parent, bg=PANEL, bd=2, relief="groove")
+        # 杂项
+        self._btn(parent, "管理角色别名", self._open_alias_editor,
+                  fg_color=Colors.CARD).pack(fill="x", padx=4, pady=2)
+        self._btn(parent, "清空日志", self._clear_log,
+                  fg_color=Colors.CARD).pack(fill="x", padx=4, pady=2)
+
+    def _build_slider(self, parent, label, var, from_val, to_val, step):
+        """滑动条行：标签 + 滑块 + 数值"""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=4, pady=2)
+
+        ctk.CTkLabel(row, text=label, font=FONTS["small"],
+                     text_color=Colors.TEXT_MUTED, width=36).pack(side="left")
+
+        slider = ctk.CTkSlider(
+            row, from_=from_val, to=to_val,
+            number_of_steps=int((to_val - from_val) / step),
+            variable=var, progress_color=Colors.PRIMARY,
+            button_color=Colors.PRIMARY,
+            button_hover_color=Colors.PRIMARY_HOVER
+        )
+        slider.pack(side="left", fill="x", expand=True, padx=6)
+
+        val_label = ctk.CTkLabel(
+            row, text=f"{var.get():.2f}" if isinstance(var.get(), float) else str(var.get()),
+            font=FONTS["small"], text_color=Colors.ACCENT, width=34
+        )
+        val_label.pack(side="left")
+
+        def _upd(*_):
+            v = var.get()
+            val_label.configure(
+                text=f"{v:.2f}" if isinstance(v, float) else str(v))
+        var.trace_add("write", _upd)
+
+    def _build_right(self, parent):
+        # Preview area with dashed border
+        preview_frame = ctk.CTkFrame(
+            parent, fg_color=Colors.CANVAS_BG, corner_radius=8,
+            border_width=2, border_color=Colors.DROP_BORDER
+        )
         preview_frame.pack(fill="both", expand=True, pady=(0, 6))
 
         self._drop_label = tk.Label(
             preview_frame,
-            text="将图片或视频拖拽到此处\n或点击左侧按钮打开文件\n\n支持 JPG / PNG / MP4 / AVI / MKV 等",
-            font=("微软雅黑", 12),
-            bg=PANEL, fg=MUTED,
-            justify="center"
+            text="✦\n\n拖入图片或视频开始识别\n\n支持 PNG · JPG · MP4",
+            font=("Microsoft YaHei UI", 12),
+            bg=self._hexify(Colors.CANVAS_BG),
+            fg=self._hexify(Colors.TEXT_MUTED),
+            justify="center", bd=0, highlightthickness=0
         )
         self._drop_label.place(relx=0.5, rely=0.5, anchor="center")
 
-        self._preview_canvas = tk.Canvas(preview_frame, bg=PANEL,
-                                         highlightthickness=0)
+        self._preview_canvas = tk.Canvas(
+            preview_frame, bg=self._hexify(Colors.CANVAS_BG),
+            highlightthickness=0, bd=0
+        )
         self._preview_canvas.pack(fill="both", expand=True)
 
         if DND_AVAILABLE:
@@ -1945,21 +2020,32 @@ class MoeFaceApp:
             self._preview_canvas.dnd_bind("<<Drop>>", self._on_drop)
         else:
             self._drop_label.config(
-                text="主人,将图片或视频拖拽到此处喵~（需安装 tkinterdnd2）\n或点击左侧「打开图片/视频」按钮\n\n支持 JPG / PNG / MP4 / AVI / MKV 等"
+                text="主人，将图片拖拽到此处喵~\n（需安装 tkinterdnd2）\n\n✦\n\n或点击左侧「打开文件」"
             )
 
-        log_frame = tk.Frame(parent, bg=PANEL)
-        log_frame.pack(fill="x", ipady=4)
-        tk.Label(log_frame, text="运行日志", bg=PANEL, fg=MUTED,
-                 font=("微软雅黑", 8)).pack(anchor="w", padx=6, pady=(4, 0))
+        # Log area
+        log_frame = ctk.CTkFrame(parent, fg_color=Colors.CARD, corner_radius=8)
+        log_frame.pack(fill="x", ipady=2)
+
+        log_hdr = ctk.CTkFrame(log_frame, fg_color="transparent")
+        log_hdr.pack(fill="x", padx=8, pady=(4, 0))
+        ctk.CTkLabel(log_hdr, text="运行日志", font=FONTS["small"],
+                     text_color=Colors.TEXT_MUTED).pack(side="left")
+
         self._log_box = scrolledtext.ScrolledText(
-            log_frame, height=8, bg="#12121e", fg="#a6e3a1",
+            log_frame, height=6, bg=self._hexify(Colors.LOG_BG),
+            fg=self._hexify(Colors.SUCCESS),
             font=("Consolas", 9), relief="flat",
             state="disabled", wrap="word"
         )
         self._log_box.pack(fill="x", padx=6, pady=4)
 
-    # ── 模型初始化（异步）────────────────────────────────────────────────
+    @staticmethod
+    def _hexify(hex_color):
+        """#RRGGBB 转 Tk 兼容颜色字符串"""
+        return hex_color
+
+    # ── 模型初始化（异步）─────────────────────────────────────
     def _load_models_async(self):
         def _run():
             ok = _ensure_models(self._log)
@@ -1972,12 +2058,11 @@ class MoeFaceApp:
         threading.Thread(target=_run, daemon=True).start()
 
     def _enable_controls(self):
-        """模型加载完成后启用相关按钮"""
-        self._rebuild_btn.config(state="normal")
-        self._load_btn.config(state="normal")
-        self._open_btn.config(state="normal")
+        self._open_btn.configure(state="normal")
+        self._rebuild_btn.configure(state="normal")
+        self._load_btn.configure(state="normal")
 
-    # ── 日志 ──────────────────────────────────────────────────────────────
+    # ── 日志 ────────────────────────────────────────────────
     def _log(self, msg: str):
         def _upd():
             self._log_box.config(state="normal")
@@ -1992,9 +2077,9 @@ class MoeFaceApp:
         self._log_box.config(state="disabled")
 
     def _set_status(self, text: str):
-        self.root.after(0, lambda: self._status_lbl.config(text=text))
+        self.root.after(0, lambda: self._status_lbl.configure(text=text))
 
-    # ── 预览帧更新 ───────────────────────────────────────────────────────
+    # ── 预览帧更新 ──────────────────────────────────────────
     def _show_frame_cv(self, cv_img):
         import cv2
         from PIL import Image, ImageTk
@@ -2017,25 +2102,22 @@ class MoeFaceApp:
             self._drop_label.place_forget()
         self.root.after(0, _upd)
 
-    # ── 特征库操作 ────────────────────────────────────────────────────────
+    # ── 特征库操作 ──────────────────────────────────────────
     def _progress_update(self, current: int, total: int, elapsed: float, db_name: str):
         if total <= 0:
             return
-        pct = min(current / total * 100, 100)
+        pct = min(current / total, 1.0)
+        self.root.after(0, lambda: self._progress_bar.set(pct))
+        name_str = f" [{db_name}]" if db_name else ""
+        text = f"构建中{name_str} {current}/{total}"
         if current > 0 and current < total:
             eta_sec = (elapsed / current) * (total - current)
             if eta_sec >= 60:
-                eta_str = f"约 {int(eta_sec // 60)} 分 {int(eta_sec % 60)} 秒"
+                eta_str = f"剩余 {int(eta_sec // 60)}分{int(eta_sec % 60)}秒"
             else:
-                eta_str = f"约 {int(eta_sec)} 秒"
-        else:
-            eta_str = "即将完成"
-        name_str = f" [{db_name}]" if db_name else ""
-        text = f"构建中{name_str} {current}/{total} ({pct:.0f}%) 剩余: {eta_str}"
-        def _upd():
-            self._progress_bar["value"] = pct
-            self._progress_label.config(text=text)
-        self.root.after(0, _upd)
+                eta_str = f"剩余 {int(eta_sec)}秒"
+            text += f" {eta_str}"
+        self.root.after(0, lambda t=text: self._progress_label.configure(text=t))
 
     def _load_db_now(self):
         if not self._models_ready:
@@ -2043,10 +2125,8 @@ class MoeFaceApp:
             return
         db_name = self._db_var.get()
         self._log(f"加载特征库: {db_name}")
-        def _reset():
-            self._progress_bar["value"] = 0
-            self._progress_label.config(text="准备加载...")
-        self.root.after(0, _reset)
+        self._progress_bar.set(0)
+        self._progress_label.configure(text="准备加载...")
 
         def _run():
             db, built = get_or_build_database(db_name, force_rebuild=False,
@@ -2055,18 +2135,13 @@ class MoeFaceApp:
             self._db_name  = db_name
             cnt = len(db)
             self._log(f"特征库就绪: {cnt} 个角色")
-            # ── 加载负面特征库 ────────────────────────────────────────
             ndb = get_or_build_negative_database(log_fn=self._log)
             self._negative_db = ndb
             if ndb:
                 self._log(f"✅ 负面特征库就绪：{len(ndb)} 个类别")
-            # ──────────────────────────────────────────────────────────
             self._set_status(f"✅ 特征库已加载（{cnt} 角色）")
-            def _done():
-                self._progress_bar["value"] = 100
-                self._progress_label.config(text=f"完成！共 {cnt} 个角色")
-            self.root.after(0, _done)
-
+            self._progress_bar.set(1.0)
+            self._progress_label.configure(text=f"完成！共 {cnt} 个角色")
             if built and self._auto_shutdown_var.get():
                 self._log("训练完成，即将关机...")
                 self._shutdown_system()
@@ -2078,10 +2153,8 @@ class MoeFaceApp:
             return
         db_name = self._db_var.get()
         self._log(f"强制重建: {db_name}")
-        def _reset():
-            self._progress_bar["value"] = 0
-            self._progress_label.config(text="准备重建...")
-        self.root.after(0, _reset)
+        self._progress_bar.set(0)
+        self._progress_label.configure(text="准备重建...")
 
         def _run():
             db, built = get_or_build_database(db_name, force_rebuild=True,
@@ -2089,24 +2162,19 @@ class MoeFaceApp:
             self._database = db
             self._db_name  = db_name
             self._log(f"✅ 重建完成: {len(db)} 个角色")
-            # ── 重建负面特征库 ────────────────────────────────────────
             ndb = get_or_build_negative_database(force_rebuild=True, log_fn=self._log)
             self._negative_db = ndb
             if ndb:
                 self._log(f"✅ 负面特征库已重建：{len(ndb)} 个类别")
-            # ──────────────────────────────────────────────────────────
             self._set_status(f"✅ 特征库已重建（{len(db)} 角色）")
-            def _done():
-                self._progress_bar["value"] = 100
-                self._progress_label.config(text=f"完成！共 {len(db)} 个角色")
-            self.root.after(0, _done)
-
+            self._progress_bar.set(1.0)
+            self._progress_label.configure(text=f"完成！共 {len(db)} 个角色")
             if built and self._auto_shutdown_var.get():
                 self._log("训练完成，即将关机...")
                 self._shutdown_system()
         threading.Thread(target=_run, daemon=True).start()
 
-    # ── 关机功能 ─────────────────────────────────────────────────────────
+    # ── 关机功能 ───────────────────────────────────────────
     def _shutdown_system(self):
         import platform
         import subprocess
@@ -2119,13 +2187,13 @@ class MoeFaceApp:
             elif system == "Darwin":
                 subprocess.run(["shutdown", "-h", "now"], check=True)
             else:
-                self._log(f"不支持自动关机的系统: {system}", "error")
+                self._log(f"不支持自动关机的系统: {system}")
                 return
             self._log("关机命令已执行，系统即将关闭...")
         except Exception as e:
-            self._log(f"关机失败: {e}，请手动关机或检查权限", "error")
+            self._log(f"关机失败: {e}，请手动关机或检查权限")
 
-    # ── 文件处理 ─────────────────────────────────────────────────────────
+    # ── 文件处理 ───────────────────────────────────────────
     def _pick_output(self):
         path = filedialog.asksaveasfilename(
             defaultextension=".mp4",
@@ -2184,32 +2252,28 @@ class MoeFaceApp:
                 db, _ = get_or_build_database(suggested, log_fn=self._log, stop_event=self._stop_evt)
                 self._database = db
                 self._db_name  = suggested
-                # ── 加载负面特征库 ────────────────────────────────────
                 ndb = get_or_build_negative_database(log_fn=self._log)
                 self._negative_db = ndb
                 if ndb:
                     self._log(f"✅ 负面特征库已加载：{len(ndb)} 个类别")
-                # ──────────────────────────────────────────────────────
 
             if not db:
                 self._log("❌ 特征库为空，无法识别。请先建库或检查 ./data 文件夹")
                 self._set_busy(False)
                 return
 
-            # ── AI 模块配置 ────────────────────────────────────────────
             enable_emotion = self._emotion_mode_var.get()
             enable_speech = self._speech_mode_var.get()
             enable_nsfw = self._nsfw_mode_var.get()
             has_ai_modules = enable_emotion or enable_speech or enable_nsfw
 
             if has_ai_modules:
-                light = not enable_speech  # 如果不需要语音，轻量加载
+                light = not enable_speech
                 if not _ensure_ai_modules(light=light, log_fn=self._log):
                     self._log("⚠️ AI 模块加载失败，跳过增强功能")
                     enable_emotion = enable_speech = enable_nsfw = False
                     has_ai_modules = False
 
-            # ── 结果收集器 ─────────────────────────────────────────────
             ai_results = AIResultCollection(path, {
                 "emotion": enable_emotion,
                 "speech": enable_speech,
@@ -2218,15 +2282,6 @@ class MoeFaceApp:
 
             mn = self._min_neighbors_var.get()
             body_mode = self._body_mode_var.get()
-
-            def _ai_done():
-                """主线处理完成后的 AI 回调"""
-                # 保存 JSON 结果
-                if len(ai_results) > 0:
-                    out_base = Path(path).stem
-                    out_dir = Path(path).parent
-                    save_analysis_result(ai_results, str(out_dir / out_base), self._log)
-                self._set_busy(False)
 
             if suffix in IMAGE_EXTS:
                 self._log(f"\n🖼  图片: {path}")
@@ -2241,12 +2296,13 @@ class MoeFaceApp:
                     stop_event=self._stop_evt,
                     done_fn=lambda: self._set_busy(False),
                     negative_db=self._negative_db,
+                    enable_emotion=enable_emotion,
+                    enable_nsfw=enable_nsfw,
+                    ai_results=ai_results,
                 )
             elif suffix in VIDEO_EXTS:
                 self._log(f"\n🎬  视频: {path}")
                 out = self._out_var.get().strip() or None
-
-                # 运行主识别
                 process_video_file(
                     source=path,
                     database=db,
@@ -2259,17 +2315,21 @@ class MoeFaceApp:
                     preview_fn=self._show_frame_cv,
                     stop_event=self._stop_evt,
                     done_fn=lambda: self._set_busy(False),
-                    # ── AI 增强模块参数 ────────────────────────────────
                     enable_emotion=enable_emotion,
                     enable_speech=enable_speech,
                     enable_nsfw=enable_nsfw,
-                    # ── 负面特征库 ────────────────────────────────────
                     negative_db=self._negative_db,
                     ai_results=ai_results,
                 )
             else:
                 self._log(f"⚠️  不支持的文件格式: {suffix}")
                 self._set_busy(False)
+
+            # Save AI results after main processing
+            if has_ai_modules and ai_results and len(ai_results) > 0:
+                out_base = Path(path).stem
+                out_dir = Path(path).parent
+                save_analysis_result(ai_results, str(out_dir / out_base), self._log)
 
         threading.Thread(target=_load_and_run, daemon=True).start()
 
@@ -2281,21 +2341,22 @@ class MoeFaceApp:
         self._busy = busy
         def _upd():
             state = "normal" if busy else "disabled"
-            self._stop_btn.config(state=state)
+            self._stop_btn.configure(state=state)
         self.root.after(0, _upd)
 
-    # ── 别名编辑器 ────────────────────────────────────────────────────────
+    # ── 别名编辑器 ──────────────────────────────────────────
     def _open_alias_editor(self):
         win = tk.Toplevel(self.root)
         win.title("角色别名管理")
         win.geometry("600x500")
-        win.configure(bg="#1e1e2e")
+        win.configure(bg=Colors.BG)
 
         tk.Label(win, text="编辑 cname/name.json（每行一个别名，逗号分隔）",
-                 bg="#1e1e2e", fg="#cdd6f4",
-                 font=("微软雅黑", 10)).pack(pady=8)
+                 bg=Colors.BG, fg=Colors.TEXT,
+                 font=("Microsoft YaHei UI", 10)).pack(pady=8)
 
-        txt = scrolledtext.ScrolledText(win, bg="#12121e", fg="#cdd6f4",
+        txt = scrolledtext.ScrolledText(win, bg=self._hexify(Colors.LOG_BG),
+                                        fg=Colors.TEXT,
                                         font=("Consolas", 9), relief="flat")
         txt.pack(fill="both", expand=True, padx=10, pady=4)
 
@@ -2318,23 +2379,22 @@ class MoeFaceApp:
             except json.JSONDecodeError as e:
                 messagebox.showerror("JSON 格式错误", str(e), parent=win)
 
-        btn_frame = tk.Frame(win, bg="#1e1e2e")
+        btn_frame = tk.Frame(win, bg=Colors.BG)
         btn_frame.pack(pady=6)
         tk.Button(btn_frame, text="💾 保存", command=_save,
-                  bg="#7c3aed", fg="white", relief="flat",
-                  font=("微软雅黑", 10), cursor="hand2",
+                  bg=Colors.PRIMARY, fg="white", relief="flat",
+                  font=("Microsoft YaHei UI", 10), cursor="hand2",
                   padx=16, pady=4).pack(side="left", padx=8)
         tk.Button(btn_frame, text="取消", command=win.destroy,
-                  bg="#374151", fg="white", relief="flat",
-                  font=("微软雅黑", 10), cursor="hand2",
+                  bg=Colors.BORDER, fg=Colors.TEXT, relief="flat",
+                  font=("Microsoft YaHei UI", 10), cursor="hand2",
                   padx=16, pady=4).pack(side="left", padx=8)
 
-    # ── 主循环 ────────────────────────────────────────────────────────────
+    # ── 主循环 ────────────────────────────────────────────
     def run(self):
         self.root.mainloop()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 #  CLI 模式（终端图形化界面）- 增强进度条显示
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2583,7 +2643,7 @@ class MoeFaceCLI:
         """识别单张图片（同时人体框+骨骼 + 人脸识别）"""
         self._log(f"📸 文件: {CLIColors.LCYAN}{path}{CLIColors.RESET}")
         threshold    = self.args.get("threshold", 0.45)
-        min_neighbors = self.args.get("min_neighbors", 3)
+        min_neighbors = self.args.get("min_neighbors", 5)
         body_mode    = self.args.get("body", False)
 
         import cv2, numpy as np
@@ -2684,7 +2744,7 @@ class MoeFaceCLI:
         """识别视频文件（同时人体框+骨骼 + 人脸识别）"""
         threshold    = self.args.get("threshold", 0.45)
         skip_frames  = self.args.get("skip_frames", 2)
-        min_neighbors = self.args.get("min_neighbors", 3)
+        min_neighbors = self.args.get("min_neighbors", 5)
         body_mode    = self.args.get("body", False)
 
         import cv2, numpy as np
@@ -2744,6 +2804,8 @@ class MoeFaceCLI:
                         minSize=(20,20), maxSize=(800,800)
                     )
                     for (x, y, fw, fh) in faces:
+                        if not _is_valid_face_box(fw, fh):
+                            continue
                         x1, y1 = max(0,x), max(0,y)
                         x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
                         face = frame[y1:y2, x1:x2]
@@ -2753,10 +2815,9 @@ class MoeFaceCLI:
                         name, score = recognize_character(face_rgb, self.db, threshold,
                                                           full_img=frame, body_persons=persons,
                                                           negative_db=self.negative_db)
-                        cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
-                        frame = draw_chinese_text(frame,
-                            f"{name or '?'} ({score:.2f})",
-                            (x1, max(0,y1-25)), 16, (0,255,0))
+                        if not name or score < threshold:
+                            continue
+                        frame = draw_modern_recognition_box(frame, x1, y1, x2, y2, name, score)
                         if name:
                             self.stats["found_names"][name] = \
                                 self.stats["found_names"].get(name, 0) + 1
@@ -2869,7 +2930,7 @@ class MoeFaceCLI:
     def _run_camera(self):
         """摄像头实时识别（同时人体框+骨骼 + 人脸识别）"""
         threshold    = self.args.get("threshold", 0.45)
-        min_neighbors = self.args.get("min_neighbors", 3)
+        min_neighbors = self.args.get("min_neighbors", 5)
         body_mode    = self.args.get("body", False)
 
         import cv2
@@ -2903,6 +2964,8 @@ class MoeFaceCLI:
                     minSize=(20,20), maxSize=(800,800)
                 )
                 for (x, y, fw, fh) in faces:
+                    if not _is_valid_face_box(fw, fh):
+                        continue
                     x1, y1 = max(0,x), max(0,y)
                     x2, y2 = min(frame.shape[1],x+fw), min(frame.shape[0],y+fh)
                     face = frame[y1:y2, x1:x2]
@@ -2912,10 +2975,9 @@ class MoeFaceCLI:
                     name, score = recognize_character(face_rgb, self.db, threshold,
                                                       full_img=frame, body_persons=persons,
                                                       negative_db=self.negative_db)
-                    cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),2)
-                    frame = draw_chinese_text(frame,
-                        f"{name or '?'} ({score:.2f})",
-                        (x1, max(0,y1-25)), 14, (0,255,0))
+                    if not name or score < threshold:
+                        continue
+                    frame = draw_modern_recognition_box(frame, x1, y1, x2, y2, name, score)
 
                 cv2.imshow("MoeFace CLI (按 Q 退出)", frame)
                 if cv2.waitKey(delay_ms) & 0xFF in (ord("q"), ord("Q")):
@@ -3045,8 +3107,8 @@ def _parse_args():
     parser.add_argument(
         "--min-neighbors",
         type=int,
-        default=3,
-        help="人脸检测灵敏度，越大误检越少（默认: 3）"
+        default=5,
+        help="人脸检测灵敏度，越大误检越少（默认: 5）"
     )
     parser.add_argument(
         "--rebuild", "-r",
