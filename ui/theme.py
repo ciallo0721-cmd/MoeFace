@@ -62,59 +62,8 @@ FONTS = {
 }
 
 
-# ── 主题应用 ──────────────────────────────────────────────────────────────
+# ── 主题应用 ──────────────────────────────────────────────
 def apply_theme():
-    """应用 MoeFace 全局主题"""
+    """应用 MoeFace 全局主题（仅设暗色模式，颜色由各控件显式传入）"""
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("dark-blue")
-
-    # 覆盖默认颜色（customtkinter 用 CTk theme JSON）
-    theme = {
-        "CTk": {
-            "fg_color": [Colors.BG, Colors.BG],
-        },
-        "CTkFrame": {
-            "fg_color": [Colors.CARD, Colors.CARD],
-            "top_fg_color": [Colors.CARD, Colors.CARD],
-            "border_color": [Colors.BORDER, Colors.BORDER],
-            "corner_radius": 8,
-        },
-        "CTkButton": {
-            "fg_color": [Colors.PRIMARY, Colors.PRIMARY],
-            "hover_color": [Colors.PRIMARY_HOVER, Colors.PRIMARY_HOVER],
-            "text_color": [Colors.TEXT, Colors.TEXT],
-            "corner_radius": 6,
-        },
-        "CTkLabel": {
-            "text_color": [Colors.TEXT, Colors.TEXT],
-        },
-        "CTkCheckBox": {
-            "fg_color": [Colors.PRIMARY, Colors.PRIMARY],
-            "hover_color": [Colors.PRIMARY_HOVER, Colors.PRIMARY_HOVER],
-            "text_color": [Colors.TEXT, Colors.TEXT],
-        },
-        "CTkOptionMenu": {
-            "fg_color": [Colors.BORDER, Colors.BORDER],
-            "button_color": [Colors.PRIMARY, Colors.PRIMARY],
-            "button_hover_color": [Colors.PRIMARY_HOVER, Colors.PRIMARY_HOVER],
-            "text_color": [Colors.TEXT, Colors.TEXT],
-        },
-        "CTkSlider": {
-            "progress_color": [Colors.PRIMARY, Colors.PRIMARY],
-            "button_color": [Colors.PRIMARY, Colors.PRIMARY],
-            "button_hover_color": [Colors.PRIMARY_HOVER, Colors.PRIMARY_HOVER],
-        },
-        "CTkProgressBar": {
-            "progress_color": [Colors.PRIMARY, Colors.PRIMARY],
-            "fg_color": [Colors.BORDER, Colors.BORDER],
-        },
-        "CTkEntry": {
-            "fg_color": [Colors.BORDER, Colors.BORDER],
-            "text_color": [Colors.TEXT, Colors.TEXT],
-            "border_color": [Colors.PRIMARY, Colors.PRIMARY],
-        },
-    }
-
-    default_theme = ctk.ThemeManager.theme
-    if default_theme:
-        default_theme.update(theme)
