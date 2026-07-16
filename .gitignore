@@ -16,3 +16,10 @@ mp_pose_repacked.task
 
 # 虚拟环境
 /.venv/
+/.venv-g2/
+
+# Release 压缩包
+*.zip
+
+# Python 复制到 G 盘的临时文件
+/.venv/python-home/

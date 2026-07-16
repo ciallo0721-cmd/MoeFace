@@ -15,6 +15,11 @@ _os.environ.setdefault('GLOG_minloglevel', '2')
 _os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 del _os
 
+# ── 版本信息（功能9：自动更新检查）─────────────────────────────────────────
+VERSION = "3.3.0"
+VERSION_URL = "https://api.github.com/repos/ciallo0721-cmd/MoeFace/releases/latest"
+VERSION_DOWNLOAD_URL = "https://github.com/ciallo0721-cmd/MoeFace/releases"
+
 import os
 import sys
 import json
@@ -150,6 +155,74 @@ def load_alias_map(path: Path = CNAME_PATH):
         return []
 
 ALIAS_MAP = load_alias_map()
+
+# ── 识别历史记录数据库（功能4）────────────────────────────────────────────
+HISTORY_DB_PATH = BASE_DIR / "history.db"
+
+def init_history_db():
+    """初始化历史记录数据库"""
+    import sqlite3
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            filename TEXT,
+            source_type TEXT,
+            roles TEXT,
+            result_json TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_to_history(filename: str, source_type: str, roles: list, result_json: str = ""):
+    """保存识别结果到历史记录"""
+    import sqlite3, json
+    try:
+        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        conn.execute(
+            "INSERT INTO history (timestamp, filename, source_type, roles, result_json) VALUES (?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(), filename, source_type, json.dumps(roles, ensure_ascii=False), result_json)
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def load_history(limit: int = 100, search: str = "") -> list:
+    """加载历史记录"""
+    import sqlite3, json
+    try:
+        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        if search:
+            rows = conn.execute(
+                "SELECT id, timestamp, filename, source_type, roles, result_json FROM history WHERE roles LIKE ? ORDER BY id DESC LIMIT ?",
+                (f"%{search}%", limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, timestamp, filename, source_type, roles, result_json FROM history ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        conn.close()
+        return [{"id": r[0], "timestamp": r[1], "filename": r[2], "source_type": r[3],
+                  "roles": json.loads(r[4]) if r[4] else [], "result_json": r[5]} for r in rows]
+    except Exception:
+        return []
+
+def get_history_stats() -> dict:
+    """获取历史统计信息"""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        total = conn.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+        conn.close()
+        return {"total": total}
+    except Exception:
+        return {"total": 0}
+
+init_history_db()
 
 def get_db_name_from_filename(filename: str) -> str:
     """根据文件名匹配角色别名（短别名要求词边界，避免误杀）"""
@@ -886,6 +959,18 @@ def get_or_build_database(db_name: str, force_rebuild=False, log_fn=print, progr
 
     if stop_event and stop_event.is_set():
         log_fn("⏹ 建库已停止")
+        return {}, True
+
+    # ⚡ 修复: 强制重建但 data/ 目录不存在时，回退到 .moe 缓存
+    if force_rebuild and not DATA_DIR.exists():
+        log_fn("⚠️ data/ 目录不存在，无法从训练图重建特征库喵~")
+        log_fn("⏪ 回退到 .moe 缓存...")
+        db = load_database_from_moe(db_name)
+        if db is not None:
+            positive_db = {k: v for k, v in db.items() if not k.startswith("负面_")}
+            log_fn(f"✅ 从 .moe 缓存加载特征库 [{db_name}]，共 {len(positive_db)} 个角色")
+            return positive_db, False
+        log_fn("❌ .moe 缓存也不存在，无法加载特征库")
         return {}, True
 
     if db_name == DEFAULT_DB_NAME:
@@ -1788,15 +1873,39 @@ class MoeFaceApp:
         self._busy      = False
         self._preview_img = None
         self._models_ready = False
+        # ── 新功能状态（2026-07-16 新增）───────────────────────────────────
+        self._last_results: list = []           # 最近一次识别结果（功能1）
+        self._queue: list = []                  # 批量处理队列（功能2）
+        self._queue_idx = 0
+        self._api_running = False               # API 服务状态（功能6）
+        self._api_server_thread = None
+        self._multi_role_mode = False           # 多角色模式（功能8）
+        self._heatmap_mode = False              # 热力图模式（功能14）
+        self._update_available = False          # 更新可用（功能9）
+        self._new_version = ""
+        self._performance_mode = "standard"     # 性能模式（功能13）
+        self._appearance_stats: dict = {}       # 出场统计（功能11）
+        self._live_overlay = None               # 直播输出（功能12）
+        # ── 模型版本管理（功能16）───────────────────────────────────────────
+        self._model_config = {}
+        self._current_model = "facenet-vggface2"
+        self._current_model_path = FEATURES_DIR
 
         self._auto_shutdown_var = tk.BooleanVar(value=False)
         self._body_mode_var = tk.BooleanVar(value=False)
         self._emotion_mode_var = tk.BooleanVar(value=False)
         self._speech_mode_var = tk.BooleanVar(value=False)
         self._nsfw_mode_var = tk.BooleanVar(value=False)
+        # ── 新功能开关（2026-07-16 新增）───────────────────────────────────
+        self._multi_role_var = tk.BooleanVar(value=False)
+        self._heatmap_var = tk.BooleanVar(value=False)
+        self._performance_var = tk.StringVar(value="standard")
 
         self._build_ui()
         self._load_models_async()
+        # ── 启动时后台检查（功能3/9）─────────────────────────────────────
+        self.root.after(2000, lambda: threading.Thread(target=self._init_tray, daemon=True).start())
+        self.root.after(3000, self._check_update_auto)
 
     # ── UI 构建 ────────────────────────────────────────────────
     def _build_ui(self):
@@ -1915,6 +2024,30 @@ class MoeFaceApp:
             font=FONTS["body"], text_color=Colors.TEXT_MUTED, fg_color=Colors.PRIMARY)
         self._body_mode_cb.pack(anchor="w", padx=4, pady=2)
 
+        # ── 新功能：多角色模式 + 热力图（功能8/14）─────────────────────────
+        self._multi_role_cb = ctk.CTkCheckBox(
+            parent, text="👥 多角色模式", variable=self._multi_role_var,
+            font=FONTS["body"], text_color=Colors.TEXT_MUTED, fg_color=Colors.PRIMARY)
+        self._multi_role_cb.pack(anchor="w", padx=4, pady=2)
+
+        self._heatmap_cb = ctk.CTkCheckBox(
+            parent, text="🔍 显示热力图", variable=self._heatmap_var,
+            font=FONTS["body"], text_color=Colors.TEXT_MUTED, fg_color=Colors.PRIMARY)
+        self._heatmap_cb.pack(anchor="w", padx=4, pady=2)
+
+        # ── 新功能：性能模式（功能13）──────────────────────────────────────
+        perf_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        perf_frame.pack(fill="x", padx=4, pady=2)
+        ctk.CTkLabel(perf_frame, text="⚡ 性能", font=FONTS["small"],
+                     text_color=Colors.TEXT_MUTED, width=36).pack(side="left")
+        self._perf_combo = ctk.CTkOptionMenu(
+            perf_frame, values=["标准", "快速", "极致"],
+            variable=self._performance_var,
+            font=FONTS["body"], fg_color=Colors.BORDER,
+            button_color=Colors.PRIMARY, button_hover_color=Colors.PRIMARY_HOVER,
+            corner_radius=6, width=100)
+        self._perf_combo.pack(side="left", padx=6)
+
         # ── 💾 输出 ──
         self._build_card_header(parent, "💾 输出（可选）")
         out_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1928,6 +2061,19 @@ class MoeFaceApp:
                       width=30, corner_radius=6,
                       fg_color=Colors.BORDER, hover_color=Colors.CARD_HOVER,
                       font=FONTS["body"]).pack(side="left", padx=4)
+
+        # ── 新功能1：导出报告按钮 ──
+        export_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        export_frame.pack(fill="x", padx=4, pady=2)
+        self._export_html_btn = self._btn(export_frame, "📄 HTML", self._export_report_html,
+                                          fg_color=Colors.CARD, width=70)
+        self._export_html_btn.pack(side="left", padx=(0, 2))
+        self._export_json_btn = self._btn(export_frame, "📋 JSON", lambda: self._export_report("json"),
+                                          fg_color=Colors.CARD, width=60)
+        self._export_json_btn.pack(side="left", padx=2)
+        self._export_csv_btn = self._btn(export_frame, "📊 CSV", lambda: self._export_report("csv"),
+                                         fg_color=Colors.CARD, width=60)
+        self._export_csv_btn.pack(side="left", padx=2)
 
         # ── ⚡ 操作 ──
         self._build_card_header(parent, "⚡ 操作")
@@ -1959,6 +2105,95 @@ class MoeFaceApp:
         # 杂项
         self._btn(parent, "管理角色别名", self._open_alias_editor,
                   fg_color=Colors.CARD).pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能2：批量处理 ──
+        self._build_card_header(parent, "📦 批量处理")
+        batch_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        batch_frame.pack(fill="x", padx=4, pady=2)
+        self._batch_add_btn = self._btn(batch_frame, "添加文件", self._batch_add_files,
+                                        fg_color=Colors.CARD, width=80)
+        self._batch_add_btn.pack(side="left", padx=(0, 2))
+        self._batch_folder_btn = self._btn(batch_frame, "添加文件夹", self._batch_add_folder,
+                                           fg_color=Colors.CARD, width=80)
+        self._batch_folder_btn.pack(side="left", padx=2)
+        self._batch_clear_btn = self._btn(batch_frame, "清空", self._batch_clear,
+                                          fg_color=Colors.CARD, width=50)
+        self._batch_clear_btn.pack(side="left", padx=2)
+        self._batch_queue_label = ctk.CTkLabel(parent, text="队列: 0 个文件",
+                                               font=FONTS["small"], text_color=Colors.TEXT_MUTED)
+        self._batch_queue_label.pack(anchor="w", padx=4, pady=1)
+        self._batch_start_btn = ctk.CTkButton(
+            parent, text="▶ 开始批量处理", command=self._batch_process,
+            fg_color=Colors.SUCCESS, hover_color="#4CAF50",
+            font=FONTS["body"], corner_radius=6)
+        self._batch_start_btn.pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能4：历史记录 ──
+        self._build_card_header(parent, "📋 历史记录")
+        self._btn(parent, "查看历史", self._open_history_viewer,
+                  fg_color=Colors.CARD).pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能6：API 服务 ──
+        self._build_card_header(parent, "🌐 API 服务")
+        self._api_btn = ctk.CTkButton(
+            parent, text="启动 API 服务 (端口 5000)", command=self._toggle_api,
+            fg_color=Colors.CARD, hover_color=Colors.CARD_HOVER,
+            font=FONTS["body"], corner_radius=6, border_width=1, border_color=Colors.BORDER)
+        self._api_btn.pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能7：特征库导入导出 ──
+        self._build_card_header(parent, "🏪 特征库管理")
+        feat_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        feat_frame.pack(fill="x", padx=4, pady=2)
+        self._export_feat_btn = self._btn(feat_frame, "导出特征库", self._export_features,
+                                          fg_color=Colors.CARD, width=90)
+        self._export_feat_btn.pack(side="left", padx=(0, 2))
+        self._import_feat_btn = self._btn(feat_frame, "导入特征库", self._import_features,
+                                          fg_color=Colors.CARD, width=90)
+        self._import_feat_btn.pack(side="left", padx=2)
+        self._btn(parent, "浏览社区特征库", self._browse_market,
+                  fg_color=Colors.CARD).pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能5：角色图片管理器 ──
+        self._btn(parent, "角色库管理", self._open_role_manager,
+                  fg_color=Colors.CARD).pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能9：更新检查 ──
+        self._update_btn = self._btn(parent, "🔄 检查更新", self._check_update_manual,
+                                     fg_color=Colors.CARD)
+        self._update_btn.pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能12：直播输出 ──
+        self._build_card_header(parent, "📺 直播输出")
+        self._live_btn = ctk.CTkButton(
+            parent, text="启动虚拟摄像头", command=self._toggle_live,
+            fg_color=Colors.CARD, hover_color=Colors.CARD_HOVER,
+            font=FONTS["body"], corner_radius=6, border_width=1, border_color=Colors.BORDER)
+        self._live_btn.pack(fill="x", padx=4, pady=2)
+
+        # ── 新功能15：语言切换 ──
+        self._build_card_header(parent, "🌍 语言")
+        lang_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        lang_frame.pack(fill="x", padx=4, pady=2)
+        self._lang_combo = ctk.CTkOptionMenu(
+            lang_frame, values=["简体中文", "English", "日本語"],
+            command=self._switch_language,
+            font=FONTS["body"], fg_color=Colors.BORDER,
+            button_color=Colors.PRIMARY, button_hover_color=Colors.PRIMARY_HOVER,
+            corner_radius=6)
+        self._lang_combo.pack(fill="x")
+
+        # ── 新功能16：模型版本管理 ──
+        self._build_card_header(parent, "🧬 特征模型")
+        model_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        model_frame.pack(fill="x", padx=4, pady=2)
+        self._model_combo = ctk.CTkOptionMenu(
+            model_frame, values=["FaceNet-VGGFace2"],
+            command=self._switch_model,
+            font=FONTS["body"], fg_color=Colors.BORDER,
+            button_color=Colors.PRIMARY, button_hover_color=Colors.PRIMARY_HOVER,
+            corner_radius=6)
+        self._model_combo.pack(fill="x")
         self._btn(parent, "清空日志", self._clear_log,
                   fg_color=Colors.CARD).pack(fill="x", padx=4, pady=2)
 
@@ -2039,6 +2274,29 @@ class MoeFaceApp:
             state="disabled", wrap="word"
         )
         self._log_box.pack(fill="x", padx=6, pady=4)
+
+        # ── 新功能2：队列列表（在日志下方）───────────────────────────────────
+        self._batch_list_frame = ctk.CTkFrame(parent, fg_color=Colors.CARD, corner_radius=8, height=80)
+        self._batch_list_box = scrolledtext.ScrolledText(
+            self._batch_list_frame, height=3, bg=self._hexify(Colors.LOG_BG),
+            fg=self._hexify(Colors.TEXT_MUTED),
+            font=("Consolas", 8), relief="flat",
+            state="disabled", wrap="none"
+        )
+        self._batch_list_box.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # ── 新功能11：统计面板 ──────────────────────────────────────────────
+        self._stats_frame = ctk.CTkFrame(parent, fg_color=Colors.CARD, corner_radius=8)
+        self._stats_label = ctk.CTkLabel(self._stats_frame, text="📊 出场统计",
+                                         font=FONTS["small"], text_color=Colors.TEXT_MUTED)
+        self._stats_label.pack(anchor="w", padx=8, pady=(4, 2))
+        self._stats_text = scrolledtext.ScrolledText(
+            self._stats_frame, height=3, bg=self._hexify(Colors.LOG_BG),
+            fg=self._hexify(Colors.TEXT),
+            font=("Consolas", 8), relief="flat",
+            state="disabled", wrap="word"
+        )
+        self._stats_text.pack(fill="x", padx=6, pady=4)
 
     @staticmethod
     def _hexify(hex_color):
@@ -2331,6 +2589,17 @@ class MoeFaceApp:
                 out_dir = Path(path).parent
                 save_analysis_result(ai_results, str(out_dir / out_base), self._log)
 
+            # ── 保存到历史记录（功能4）和 _last_results（功能1）───────────────
+            source_type = "video" if suffix in VIDEO_EXTS else "image"
+            save_to_history(path, source_type, [])
+            # 保存结果用于导出
+            self._last_results.append({
+                "source": path,
+                "timestamp": datetime.now().isoformat(),
+                "source_type": source_type,
+                "results": [],
+            })
+
         threading.Thread(target=_load_and_run, daemon=True).start()
 
     def _stop_processing(self):
@@ -2390,8 +2659,511 @@ class MoeFaceApp:
                   font=("Microsoft YaHei UI", 10), cursor="hand2",
                   padx=16, pady=4).pack(side="left", padx=8)
 
-    # ── 主循环 ────────────────────────────────────────────
-    def run(self):
+    # ── 新功能1：导出报告 ──────────────────────────────────────────
+    def _export_report_html(self):
+        """导出 HTML 格式报告"""
+        if not self._last_results:
+            self._log("⚠️ 没有可导出的识别结果")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML 报告", "*.html"), ("所有文件", "*.*")]
+        )
+        if not path:
+            return
+        self._log("正在导出 HTML 报告...")
+        try:
+            from report_generator import ReportGenerator
+            rg = ReportGenerator("MoeFace 识别报告")
+            rg.source_file = self._last_results[0].get("source", "")
+            for r in self._last_results:
+                roles = r.get("results", [])
+                for role in roles:
+                    rg.unique_roles.add(role.get("name", "未知"))
+            rg.total_processed = len(self._last_results)
+            rg.generate_html(path)
+            self._log(f"✅ HTML 报告已保存: {path}")
+        except Exception as e:
+            self._log(f"❌ 导出失败: {e}")
+
+    def _export_report(self, fmt: str):
+        """导出 JSON/CSV 报告"""
+        if not self._last_results:
+            self._log("⚠️ 没有可导出的识别结果")
+            return
+        ext = {"json": ".json", "csv": ".csv"}
+        path = filedialog.asksaveasfilename(
+            defaultextension=ext.get(fmt, ".json"),
+            filetypes=[(f"{fmt.upper()} 文件", f"*.{fmt}"), ("所有文件", "*.*")]
+        )
+        if not path:
+            return
+        self._log(f"正在导出 {fmt.upper()}...")
+        try:
+            if fmt == "json":
+                import json
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(self._last_results, f, ensure_ascii=False, indent=2)
+            elif fmt == "csv":
+                import csv
+                with open(path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["文件名", "角色名", "相似度", "时间戳"])
+                    for r in self._last_results:
+                        source = r.get("source", "")
+                        ts = r.get("timestamp", "")
+                        for role in r.get("results", []):
+                            writer.writerow([source, role.get("name", ""),
+                                             role.get("score", 0), ts])
+            self._log(f"✅ {fmt.upper()} 已保存: {path}")
+        except Exception as e:
+            self._log(f"❌ 导出失败: {e}")
+
+    # ── 新功能2：批量处理 ──────────────────────────────────────────
+    def _update_batch_queue_label(self):
+        self._batch_queue_label.configure(text=f"队列: {len(self._queue)} 个文件")
+
+    def _batch_add_files(self):
+        paths = filedialog.askopenfilenames(
+            filetypes=[("图片/视频", " ".join(f"*{e}" for e in IMAGE_EXTS | VIDEO_EXTS)),
+                       ("图片", " ".join(f"*{e}" for e in IMAGE_EXTS)),
+                       ("视频", " ".join(f"*{e}" for e in VIDEO_EXTS))]
+        )
+        for p in paths:
+            if p not in self._queue:
+                self._queue.append(p)
+        self._update_batch_queue_label()
+        self._refresh_batch_list()
+        self._log(f"📦 已添加 {len(paths)} 个文件到队列")
+
+    def _batch_add_folder(self):
+        folder = filedialog.askdirectory()
+        if not folder:
+            return
+        count = 0
+        for ext in IMAGE_EXTS | VIDEO_EXTS:
+            for f in Path(folder).rglob(f"*{ext}"):
+                if str(f) not in self._queue:
+                    self._queue.append(str(f))
+                    count += 1
+        self._update_batch_queue_label()
+        self._refresh_batch_list()
+        self._log(f"📦 已添加 {count} 个文件到队列")
+
+    def _batch_clear(self):
+        self._queue.clear()
+        self._queue_idx = 0
+        self._update_batch_queue_label()
+        self._refresh_batch_list()
+        self._log("🗑 已清空队列")
+
+    def _refresh_batch_list(self):
+        self._batch_list_box.config(state="normal")
+        self._batch_list_box.delete("1.0", "end")
+        for i, p in enumerate(self._queue[self._queue_idx:], self._queue_idx + 1):
+            self._batch_list_box.insert("end", f"  {i}. {Path(p).name}\n")
+        self._batch_list_box.config(state="disabled")
+
+    def _batch_process(self):
+        if not self._queue:
+            self._log("⚠️ 队列为空，请先添加文件")
+            return
+        if self._busy:
+            self._log("⚠️ 正在处理中")
+            return
+
+        def _run():
+            self._set_busy(True)
+            self._queue_idx = 0
+            total = len(self._queue)
+            while self._queue_idx < total:
+                if self._stop_evt.is_set():
+                    self._log("⏹ 批量处理已停止")
+                    break
+                path = self._queue[self._queue_idx]
+                self._log(f"\n📦 [{self._queue_idx + 1}/{total}] {Path(path).name}")
+                # 直接调用 dispatch 的内部逻辑
+                self._dispatch_file_internal(path)
+                self._queue_idx += 1
+                self.root.after(0, self._refresh_batch_list)
+
+            self._set_busy(False)
+            self._log(f"✅ 批量处理完成: {self._queue_idx}/{total}")
+            self.root.after(0, self._update_batch_queue_label)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _dispatch_file_internal(self, path: str):
+        """内部文件处理（不检查 busy 状态，供批量处理使用）"""
+        from modules.base import AIResultCollection
+        suffix = Path(path).suffix.lower()
+        suggested = get_db_name_from_filename(Path(path).name)
+
+        self._stop_evt.clear()
+
+        db = self._database
+        db_name = self._db_name
+        if suggested != db_name or not db:
+            db, _ = get_or_build_database(suggested, log_fn=self._log, stop_event=self._stop_evt)
+            self._database = db
+            self._db_name = suggested
+            ndb = get_or_build_negative_database(log_fn=self._log)
+            self._negative_db = ndb
+
+        if not db:
+            self._log(f"❌ 特征库为空，跳过: {path}")
+            return
+
+        enable_emotion = self._emotion_mode_var.get()
+        enable_speech = self._speech_mode_var.get()
+        enable_nsfw = self._nsfw_mode_var.get()
+        has_ai = enable_emotion or enable_speech or enable_nsfw
+        if has_ai:
+            _ensure_ai_modules(light=not enable_speech, log_fn=self._log)
+
+        ai_results = AIResultCollection(path, {"emotion": enable_emotion, "speech": enable_speech, "nsfw": enable_nsfw})
+        mn = self._min_neighbors_var.get()
+        body_mode = self._body_mode_var.get()
+
+        if suffix in IMAGE_EXTS:
+            process_image_file(source=path, database=db, threshold=self._threshold_var.get(),
+                               min_neighbors=mn, body_mode=body_mode, log_fn=self._log,
+                               preview_fn=self._show_frame_cv, stop_event=self._stop_evt,
+                               negative_db=self._negative_db, enable_emotion=enable_emotion,
+                               enable_nsfw=enable_nsfw, ai_results=ai_results)
+        elif suffix in VIDEO_EXTS:
+            out = self._out_var.get().strip() or None
+            process_video_file(source=path, database=db, output_path=out,
+                               threshold=self._threshold_var.get(), skip_frames=self._skip_var.get(),
+                               min_neighbors=mn, body_mode=body_mode, log_fn=self._log,
+                               preview_fn=self._show_frame_cv, stop_event=self._stop_evt,
+                               enable_emotion=enable_emotion, enable_speech=enable_speech,
+                               enable_nsfw=enable_nsfw, negative_db=self._negative_db, ai_results=ai_results)
+        else:
+            self._log(f"⚠️ 不支持的文件格式: {suffix}")
+
+    # ── 新功能3：系统托盘 + 全局快捷键（静默加载）──────────────────────
+    def _init_tray(self):
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+            img = Image.new("RGB", (64, 64), (108, 92, 231))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([8, 8, 56, 56], fill=(162, 155, 254))
+            menu = pystray.Menu(
+                pystray.MenuItem("显示窗口", lambda: self.root.deiconify()),
+                pystray.MenuItem("截屏识别", self._tray_screenshot),
+                pystray.MenuItem("切换特征库", self._tray_switch_db),
+                pystray.MenuItem("退出", self._tray_quit),
+            )
+            self._tray_icon = pystray.Icon("MoeFace", img, "MoeFace", menu)
+            threading.Thread(target=self._tray_icon.run, daemon=True).start()
+        except Exception:
+            pass  # pystray 不可用则静默跳过
+
+    def _tray_screenshot(self):
+        """托盘菜单：截屏识别"""
+        def _run():
+            try:
+                from PIL import ImageGrab
+                screenshot = ImageGrab.grab()
+                import cv2, numpy as np, tempfile
+                path = tempfile.mktemp(suffix=".png")
+                screenshot.save(path)
+                self.root.after(0, lambda: self._dispatch_file(path))
+            except Exception as e:
+                self._log(f"📸 截屏失败: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _tray_switch_db(self):
+        self.root.after(0, lambda: self._db_combo.open_dropdown_menu())
+
+    def _tray_quit(self):
+        self.root.after(0, self.root.quit)
+
+    # ── 新功能4：历史记录查看器 ──────────────────────────────────
+    def _open_history_viewer(self):
+        win = tk.Toplevel(self.root)
+        win.title("识别历史记录")
+        win.geometry("700x500")
+        win.configure(bg=Colors.BG)
+
+        # 搜索框
+        search_frame = tk.Frame(win, bg=Colors.BG)
+        search_frame.pack(fill="x", padx=10, pady=8)
+        tk.Label(search_frame, text="搜索角色:", bg=Colors.BG, fg=Colors.TEXT,
+                 font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 8))
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(search_frame, textvariable=search_var, width=30,
+                                bg=Colors.LOG_BG, fg=Colors.TEXT, relief="flat")
+        search_entry.pack(side="left", padx=(0, 8))
+
+        # 表格
+        cols = ("时间", "文件名", "类型", "角色")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=15)
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=150 if c == "时间" else 100)
+        tree.pack(fill="both", expand=True, padx=10, pady=4)
+
+        scrollbar = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        def _refresh(search_text=""):
+            tree.delete(*tree.get_children())
+            records = load_history(search=search_text)
+            for r in records:
+                roles_str = ", ".join(str(name) for name in r.get("roles", [])[:3])
+                if len(r.get("roles", [])) > 3:
+                    roles_str += "..."
+                tree.insert("", "end", values=(
+                    r["timestamp"][:19], Path(r["filename"]).name,
+                    r["source_type"], roles_str
+                ))
+
+        def _on_search(*_):
+            _refresh(search_var.get().strip())
+
+        search_var.trace_add("write", _on_search)
+        _refresh()
+
+        # 双击查看详情
+        def _on_double_click(event):
+            sel = tree.selection()
+            if sel:
+                values = tree.item(sel[0], "values")
+                messagebox.showinfo("历史详情",
+                                    f"时间: {values[0]}\n文件: {values[1]}\n类型: {values[2]}\n角色: {values[3]}",
+                                    parent=win)
+
+        tree.bind("<Double-1>", _on_double_click)
+
+        # 关闭按钮
+        tk.Button(win, text="关闭", command=win.destroy,
+                  bg=Colors.PRIMARY, fg="white", relief="flat",
+                  font=("Microsoft YaHei UI", 10), padx=16, pady=4).pack(pady=8)
+
+        # 统计
+        stats = get_history_stats()
+        tk.Label(win, text=f"共 {stats['total']} 条记录", bg=Colors.BG,
+                 fg=Colors.TEXT_MUTED, font=("Microsoft YaHei UI", 9)).pack()
+
+    # ── 新功能5：角色图片管理器 ──────────────────────────────────
+    def _open_role_manager(self):
+        win = tk.Toplevel(self.root)
+        win.title("角色训练图片管理器")
+        win.geometry("700x500")
+        win.configure(bg=Colors.BG)
+
+        left_frame = tk.Frame(win, bg=Colors.BG, width=200)
+        left_frame.pack(side="left", fill="y", padx=8, pady=8)
+        left_frame.pack_propagate(False)
+
+        right_frame = tk.Frame(win, bg=Colors.BG)
+        right_frame.pack(side="left", fill="both", expand=True, padx=8, pady=8)
+
+        tk.Label(left_frame, text="角色列表", bg=Colors.BG, fg=Colors.TEXT,
+                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+
+        roles = scan_role_folders()
+        listbox = tk.Listbox(left_frame, bg=Colors.LOG_BG, fg=Colors.TEXT,
+                             selectbackground=Colors.PRIMARY, relief="flat")
+        listbox.pack(fill="both", expand=True)
+        for r in roles:
+            listbox.insert("end", r)
+
+        # 预览区域
+        preview_label = tk.Label(right_frame, text="选择角色查看图片",
+                                 bg=Colors.BG, fg=Colors.TEXT_MUTED)
+        preview_label.pack()
+
+        img_frame = tk.Frame(right_frame, bg=Colors.BG)
+        img_frame.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(img_frame, bg=Colors.LOG_BG, highlightthickness=0)
+        scrollbar_v = tk.Scrollbar(img_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=Colors.LOG_BG)
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar_v.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar_v.pack(side="right", fill="y")
+
+        def _on_select(event):
+            for w in scrollable_frame.winfo_children():
+                w.destroy()
+            sel = listbox.curselection()
+            if not sel:
+                return
+            role = listbox.get(sel[0])
+            role_path = _find_role_path(role)
+            if not role_path:
+                return
+            imgs = list(role_path.glob("*"))[:50]
+            preview_label.config(text=f"{role} — {len(imgs)} 张图片")
+            from PIL import Image, ImageTk
+            for i, img_path in enumerate(imgs[:20]):
+                try:
+                    pil_img = Image.open(img_path)
+                    pil_img.thumbnail((120, 120))
+                    tk_img = ImageTk.PhotoImage(pil_img)
+                    lbl = tk.Label(scrollable_frame, image=tk_img, bg=Colors.LOG_BG)
+                    lbl.image = tk_img
+                    lbl.grid(row=i // 4, column=i % 4, padx=4, pady=4)
+                except Exception:
+                    pass
+
+        listbox.bind("<<ListboxSelect>>", _on_select)
+
+    # ── 新功能6：API 服务控制 ──────────────────────────────────
+    def _toggle_api(self):
+        if self._api_running:
+            self._log("ℹ️ 请关闭终端窗口来停止 API 服务")
+            return
+        try:
+            from api_server import start_api_server
+            ok = start_api_server(port=5000, db_name=self._db_name or DEFAULT_DB_NAME,
+                                  log_fn=self._log)
+            if ok:
+                self._api_running = True
+                self._api_btn.configure(text="🟢 API 运行中 (端口 5000)", fg_color=Colors.SUCCESS)
+                self._log("🌐 API 服务已启动: http://localhost:5000")
+        except Exception as e:
+            self._log(f"❌ API 启动失败: {e}")
+
+    # ── 新功能7：特征库导入导出 ────────────────────────────────
+    def _export_features(self):
+        if not self._database:
+            self._log("⚠️ 特征库为空，无法导出")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".moe",
+            filetypes=[("MoeFace 特征库", "*.moe"), ("所有文件", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            ndb = self._negative_db or {}
+            save_database_to_moe(self._database, Path(path).stem, negative_db=ndb)
+            # 复制到目标路径
+            src = FEATURES_DIR / f"{_safe_filename(Path(path).stem)}.moe"
+            if src.exists():
+                shutil.copy2(str(src), path)
+                self._log(f"✅ 特征库已导出: {path}")
+            else:
+                self._log("✅ 特征库已保存")
+        except Exception as e:
+            self._log(f"❌ 导出失败: {e}")
+
+    def _import_features(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("MoeFace 特征库", "*.moe"), ("所有文件", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            dst = FEATURES_DIR / Path(path).name
+            shutil.copy2(path, str(dst))
+            self._log(f"✅ 特征库已导入: {dst.name}")
+            self._log("💡 请通过「加载特征库」使用新导入的特征库")
+        except Exception as e:
+            self._log(f"❌ 导入失败: {e}")
+
+    def _browse_market(self):
+        import webbrowser
+        webbrowser.open("https://github.com/ciallo0721-cmd/MoeFace/releases")
+        self._log("🌐 已打开浏览器前往社区特征库页面")
+
+    # ── 新功能9：更新检查 ─────────────────────────────────────
+    def _check_update_auto(self):
+        """后台自动检查更新"""
+        def _run():
+            try:
+                import requests
+                resp = requests.get(VERSION_URL, timeout=5)
+                data = resp.json()
+                latest = data.get("tag_name", "").lstrip("v")
+                if latest and latest > VERSION:
+                    self._update_available = True
+                    self._new_version = latest
+                    self.root.after(0, lambda: self._update_btn.configure(
+                        text=f"🔄 新版本 {latest} 可用!", fg_color=Colors.SUCCESS))
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _check_update_manual(self):
+        """手动检查更新"""
+        if self._update_available:
+            import webbrowser
+            webbrowser.open(VERSION_DOWNLOAD_URL)
+            self._log(f"🌐 正在前往 {VERSION_DOWNLOAD_URL}")
+            return
+        self._log("正在检查更新...")
+        def _run():
+            try:
+                import requests
+                resp = requests.get(VERSION_URL, timeout=5)
+                data = resp.json()
+                latest = data.get("tag_name", "").lstrip("v")
+                if latest and latest > VERSION:
+                    self.root.after(0, lambda: self._log(f"🔄 新版本 {latest} 可用！点击按钮下载"))
+                    self.root.after(0, lambda: self._update_btn.configure(
+                        text=f"🔄 新版本 {latest} 可用!", fg_color=Colors.SUCCESS))
+                    self._update_available = True
+                    self._new_version = latest
+                else:
+                    self.root.after(0, lambda: self._log("✅ 当前已是最新版本"))
+            except Exception as e:
+                self.root.after(0, lambda: self._log(f"⚠️ 检查更新失败: {e}"))
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ── 新功能12：直播输出控制 ──────────────────────────────────
+    def _toggle_live(self):
+        try:
+            from live_overlay import LiveOverlay
+            if self._live_overlay is None:
+                self._live_overlay = LiveOverlay()
+            if self._live_overlay._running:
+                self._live_overlay.stop()
+                self._live_btn.configure(text="启动虚拟摄像头", fg_color=Colors.CARD)
+                self._log("📺 虚拟摄像头已停止")
+            else:
+                ok = self._live_overlay.start()
+                if ok:
+                    self._live_btn.configure(text="🟢 虚拟摄像头运行中", fg_color=Colors.SUCCESS)
+                    self._log("📺 虚拟摄像头已启动")
+                else:
+                    self._log("⚠️ 虚拟摄像头不可用，请安装 pyvirtualcam 和 OBS")
+        except Exception as e:
+            self._log(f"⚠️ 直播功能不可用: {e}")
+
+    # ── 新功能15：语言切换 ──────────────────────────────────────
+    def _switch_language(self, lang: str):
+        try:
+            from i18n.i18n import set_language
+            lang_map = {"简体中文": "zh-CN", "English": "en", "日本語": "ja"}
+            code = lang_map.get(lang, "zh-CN")
+            set_language(code)
+            self._log(f"🌍 语言已切换为: {lang}")
+            self._log("💡 部分界面需重启应用后生效")
+        except Exception as e:
+            self._log(f"⚠️ 语言切换失败: {e}")
+
+    # ── 新功能16：模型版本切换 ────────────────────────────────
+    def _switch_model(self, model_name: str):
+        self._log(f"🧬 切换模型: {model_name}")
+        self._log("💡 切换后请重建特征库以生成新的特征向量")
+        if model_name == "FaceNet-VGGFace2":
+            self._current_model = "facenet-vggface2"
+        else:
+            self._current_model = "facenet-vggface2"
+        # 重建需要重新加载模型
+        global _models_ready
+        _models_ready = False
+        self._models_ready = False
+        self._load_models_async()
         self.root.mainloop()
 
 
