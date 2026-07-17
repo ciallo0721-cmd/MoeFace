@@ -88,8 +88,8 @@ RESOURCE_DIR = _resource_base()
 
 os.chdir(BASE_DIR)
 
-CASCADE_PATH = RESOURCE_DIR / "lbpcascade_animeface.xml"
-FONT_PATH    = RESOURCE_DIR / "simhei.ttf"
+CASCADE_PATH = RESOURCE_DIR / "models" / "lbpcascade_animeface.xml"
+FONT_PATH    = RESOURCE_DIR / "models" / "simhei.ttf"
 FEATURES_DIR = BASE_DIR / "features"
 DATA_DIR     = BASE_DIR / "data"
 CNAME_PATH   = RESOURCE_DIR / "cname" / "name.json"
@@ -1244,13 +1244,14 @@ def _get_pose_landmarker(log_fn=print):
         return None
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, 'models')
 
     # 选模型：全量 > 轻量
-    model_path = os.path.join(base_dir, 'pose_landmarker.task')
+    model_path = os.path.join(model_dir, 'pose_landmarker.task')
     if not os.path.exists(model_path):
-        model_path = os.path.join(base_dir, 'pose_landmarker_lite.task')
+        model_path = os.path.join(model_dir, 'pose_landmarker_lite.task')
         if not os.path.exists(model_path):
-            log_fn("❌ 未找到 pose_landmarker.task，请从 Google MediaPipe 下载放到项目目录")
+            log_fn("❌ 未找到 pose_landmarker.task，请从 Google MediaPipe 下载放到 models/ 目录")
             return None
 
     def _try_load(path):
@@ -1270,7 +1271,7 @@ def _get_pose_landmarker(log_fn=print):
         err_msg = str(e)
         if 'Unable to open zip archive' in err_msg or 'zip' in err_msg.lower():
             # 已知兼容性问题：用 Python 重新打包后加载
-            repacked = os.path.join(base_dir, 'mp_pose_repacked.task')
+            repacked = os.path.join(model_dir, 'mp_pose_repacked.task')
             try:
                 import zipfile
                 log_fn("🔧 检测到 zip 兼容性问题，正在重新打包模型...")
