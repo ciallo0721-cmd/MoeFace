@@ -244,7 +244,7 @@ class NSFWDetector(BaseAIModule):
     def _rule_based_visual(self, frame_bgr) -> Tuple[float, str]:
         """
         基于规则的视觉 NSFW 分析。
-        分析肤色比例、边缘密度、纹理复杂度等特征。
+        分析肉色/白色/粉色/黑色比例 + 极简形状分析。
         """
         import cv2
         import numpy as np
@@ -253,43 +253,183 @@ class NSFWDetector(BaseAIModule):
         if h == 0 or w == 0:
             return 0.0, "safe"
 
-        # 1. 肤色检测（HSV 范围）
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        # 典型的肤色范围
-        skin_mask = cv2.inRange(hsv, (0, 20, 70), (20, 255, 255))
-        skin_mask2 = cv2.inRange(hsv, (170, 20, 70), (180, 255, 255))
+        total_pixels = h * w
+
+        # 1. 肉色（肤色）检测 — 扩大范围覆盖更多动漫肤色
+        skin_mask = cv2.inRange(hsv, (0, 15, 50), (25, 255, 255))
+        skin_mask2 = cv2.inRange(hsv, (155, 15, 50), (180, 255, 255))
         skin_mask = cv2.bitwise_or(skin_mask, skin_mask2)
-        skin_ratio = float(np.count_nonzero(skin_mask)) / (h * w)
+        skin_ratio = float(np.count_nonzero(skin_mask)) / total_pixels
 
-        # 2. 纹理复杂度（拉普拉斯方差）
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        laplacian_var = float(cv2.Laplacian(gray, cv2.CV_32F).var())
+        # 2. 白色检测（低饱和度 + 高亮度）
+        white_mask = cv2.inRange(hsv, (0, 0, 200), (180, 30, 255))
+        white_ratio = float(np.count_nonzero(white_mask)) / total_pixels
 
-        # 3. 边缘密度
-        edges = cv2.Canny(gray, 50, 150)
-        edge_ratio = float(np.count_nonzero(edges)) / (h * w)
+        # 3. 粉色检测
+        pink_mask = cv2.inRange(hsv, (140, 30, 100), (170, 255, 255))
+        pink_ratio = float(np.count_nonzero(pink_mask)) / total_pixels
 
-        # 4. 暴露程度评分
-        # 大面积肤色 + 低纹理 = 潜在 NSFW
-        exposure_score = skin_ratio * 0.5
-        if skin_ratio > 0.4:
-            exposure_score += 0.3
-        if skin_ratio > 0.6:
-            exposure_score += 0.2
+        # 4. 黑色检测（低亮度）
+        black_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 50))
+        black_ratio = float(np.count_nonzero(black_mask)) / total_pixels
 
-        # 综合评分
-        nsfw_score = min(1.0, exposure_score)
+        # 5. 颜色综合判定
+        comb_ratio = skin_ratio + white_ratio + pink_ratio + black_ratio
 
-        if nsfw_score < 0.2:
-            label = "safe"
-        elif nsfw_score < 0.45:
-            label = "questionable"
-        elif nsfw_score < 0.7:
-            label = "nsfw"
-        else:
-            label = "explicit"
+        # 条件A: 经典亮色NSFW（肉/白/粉主导）
+        cond_bright = (skin_ratio + white_ratio + pink_ratio >= 0.80
+                       or skin_ratio >= 0.90 or pink_ratio >= 0.70)
+        # 条件B: 黑色NSFW（黑色衣服+裸露皮肤）
+        cond_black_nsfw = (black_ratio >= 0.20 and skin_ratio >= 0.20
+                           and black_ratio + skin_ratio >= 0.68)
+        # 条件C: 大面积裸露（扩展肤色后总占比高）
+        cond_exposed = (comb_ratio >= 0.85 and skin_ratio >= 0.30)
+        # 条件D: 白色为主NSFW（白色背景+裸露皮肤）
+        #   skin < 25% （如连裤袜/遮挡多）→ white+skin >= 72%
+        #   skin ≥ 25% （如正常人物特写）→ white+skin >= 82%，防误杀
+        cond_white_nsfw = (
+            white_ratio >= 0.40 and skin_ratio >= 0.10 and (
+                (skin_ratio < 0.25 and white_ratio + skin_ratio >= 0.72)
+                or (skin_ratio >= 0.25 and white_ratio + skin_ratio >= 0.82)
+            )
+        )
 
+        if cond_bright or cond_black_nsfw or cond_exposed or cond_white_nsfw:
+            peak = max(skin_ratio, white_ratio, pink_ratio, black_ratio)
+            nsfw_score = min(1.0, 0.80 + peak * 0.2)
+            label = "explicit" if nsfw_score >= 0.95 else "nsfw"
+            return nsfw_score, label
+
+        # 6. 形状分析（颜色不够时补刀）
+        shape_score, shape_hint = self._shape_analysis(frame_bgr)
+        if shape_score >= 0.70:
+            return min(1.0, shape_score), "nsfw"
+
+        # 安全/可疑
+        nsfw_score = min(0.6, comb_ratio * 0.6)
+        label = "safe" if nsfw_score < 0.3 else "questionable"
         return nsfw_score, label
+
+    def _shape_analysis(self, frame_bgr):
+        """
+        极简形状分析，检测 NSFW 特征轮廓。
+        
+        检测目标:
+          (▪)(▪)  — 两个水平并列的椭圆区域（胸部特征）
+          m / w   — M 形或 W 形轮廓（特定身体曲线）
+          - - -   — 底部横线/黑色遮挡（脚部、马赛克遮挡）
+        
+        返回 (score, hint):
+            score: 0.0~1.0
+            hint: 形状描述
+        """
+        import cv2
+        import numpy as np
+
+        h, w = frame_bgr.shape[:2]
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 30, 100)
+
+        # ── 方法1: 轮廓分析 — 找水平并列的椭圆 ──
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        ellipses = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 200 or area > h * w * 0.3:
+                continue
+            peri = cv2.arcLength(cnt, True)
+            if peri < 1:
+                continue
+            # 圆形度: 4π*面积/周长²，圆形=1
+            circularity = 4 * np.pi * area / (peri * peri)
+            if 0.4 < circularity < 1.5:
+                x, y, cw, ch = cv2.boundingRect(cnt)
+                ellipses.append((x + cw/2, y + ch/2, cw, ch, area))
+
+        # 检测胸部特征 (▪)(▪): 两个大小相近、水平排列的椭圆
+        chest_score = 0.0
+        for i in range(len(ellipses)):
+            for j in range(i + 1, len(ellipses)):
+                x1, y1, w1, h1 = ellipses[i][:4]
+                x2, y2, w2, h2 = ellipses[j][:4]
+                dx = abs(x1 - x2)
+                dy = abs(y1 - y2)
+                # 水平距离合适、高度差小、大小相近
+                if dy < max(h1, h2) * 0.6 and dx < max(w1, w2) * 2.5:
+                    size_ok = min(w1 * h1, w2 * h2) / max(w1 * h2, w2 * h2) > 0.3
+                    if size_ok:
+                        chest_score = max(chest_score, 0.78 + 0.22 * min(
+                            1.0, min(w1 * h1, w2 * h2) / 5000))
+
+        if chest_score >= 0.70:
+            return chest_score, "(▪)(▪)"
+
+        # ── 方法2: 低分辨率网格分析 — 检测 M/W 形和底部横线(- - -) ──
+        tiny = cv2.resize(edges.astype(np.float32), (8, 8))
+        tiny = (tiny > 20).astype(np.float32)
+
+        # M 形检测：上半部分左右有峰，中间低
+        top_mid_left = tiny[0:4, 1:3].mean()
+        top_mid_right = tiny[0:4, 5:7].mean()
+        top_center = tiny[0:4, 3:5].mean()
+        bottom_mid = tiny[4:8, 2:6].mean()
+
+        m_score = 0.0
+        w_score = 0.0
+
+        if top_mid_left > 0.3 and top_mid_right > 0.3 and top_center < max(top_mid_left, top_mid_right) * 0.8:
+            m_score = 0.70 + 0.30 * min(1.0, (top_mid_left + top_mid_right) / 2)
+            if bottom_mid > 0.3:
+                m_score += 0.10
+
+        bottom_left = tiny[4:8, 1:3].mean()
+        bottom_right = tiny[4:8, 5:7].mean()
+        if bottom_left > 0.3 and bottom_right > 0.3 and bottom_mid < max(bottom_left, bottom_right) * 0.8:
+            w_score = 0.70 + 0.30 * min(1.0, (bottom_left + bottom_right) / 2)
+
+        shape_score = max(m_score, w_score)
+        if shape_score >= 0.70:
+            hint = "m" if m_score >= w_score else "w"
+            return min(1.0, shape_score), hint
+
+        # ── 方法3: 底部横线检测(- - -) — 脚部/黑色遮挡 ──
+        # 在 8x8 签名中，检测底部是否有连续的水平边缘线
+        # - - - 表现为：底部行(5~7)中水平边缘密度高，且垂直边缘少
+        # 用 Sobel 分离水平和垂直边缘
+        sobel_x = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
+        h_edges = np.abs(sobel_x) > 30  # 水平边缘
+        v_edges = np.abs(sobel_y) > 30  # 垂直边缘
+
+        # 只看底部 1/3 区域（脚/遮挡通常在下方）
+        bot_h = h_edges[int(h*0.6):, :]
+        bot_v = v_edges[int(h*0.6):, :]
+        bot_h_ratio = float(np.count_nonzero(bot_h)) / bot_h.size if bot_h.size > 0 else 0
+        bot_v_ratio = float(np.count_nonzero(bot_v)) / bot_v.size if bot_v.size > 0 else 0
+
+        # 底部水平横线特征：水平边缘多 + 垂直边缘少（横线为主）
+        dash_score = 0.0
+        if bot_h_ratio > 0.05 and bot_v_ratio < bot_h_ratio * 0.6:
+            dash_score = 0.70 + 0.30 * min(1.0, bot_h_ratio * 5)
+
+        # 黑色遮挡检测：底部是否有连续水平深色条带
+        # 取底部区域的灰度值，找水平方向的暗带
+        bot_gray = gray[int(h*0.7):, :]
+        if bot_gray.size > 0:
+            row_means = np.mean(bot_gray, axis=1)  # 每行平均灰度
+            dark_rows = np.sum(row_means < 40)  # 非常暗的行数
+            dark_ratio = dark_rows / max(bot_gray.shape[0], 1)
+            if dark_ratio > 0.3:
+                # 底部有大面积黑色，可能是遮挡/马赛克
+                dash_score = max(dash_score, 0.75 + 0.25 * min(1.0, dark_ratio))
+
+        if dash_score >= 0.70:
+            return min(1.0, dash_score), "- - -"
+
+        return 0.0, ""
 
     # ── 语义通道 ───────────────────────────────────────────────────────
 

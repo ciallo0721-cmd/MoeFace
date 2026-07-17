@@ -156,22 +156,51 @@ def review_image(file_path: str) -> dict:
             result["reason"] = "图片尺寸无效"
             return result
 
-        # ── 1. NSFW 模型检测（性/裸露内容） ────────────────────────────
+        # ── 1. NSFW 检测（三次审核防误判） ────────────────────────────
         nsfw_score = 0.0
         detector = _get_nsfw_detector()
         if detector and detector is not False:
             try:
-                ns = detector._detect_visual_nsfw(img)
-                nsfw_score = ns[0]  # (score, label)
+                votes = 0
+                scores = []
+
+                # 第1轮: 全流程检测（模型 → ONNX → 颜色+形状分析）
+                s1 = detector._detect_visual_nsfw(img)[0]
+                scores.append(s1)
+                if s1 > NSFW_THRESHOLD:
+                    votes += 1
+
+                # 第2轮: 纯颜色规则分析（肉色/白色/粉色/黑色比例）
+                if hasattr(detector, '_rule_based_visual'):
+                    s2, _ = detector._rule_based_visual(img)
+                else:
+                    s2 = s1
+                scores.append(s2)
+                if s2 > NSFW_THRESHOLD:
+                    votes += 1
+
+                # 第3轮: 纯形状分析（(▪)(▪) / m/w / - - -）
+                if hasattr(detector, '_shape_analysis'):
+                    s3, _ = detector._shape_analysis(img)
+                else:
+                    s3 = 0.0
+                scores.append(s3)
+                if s3 > 0.70:  # 形状分析用独立阈值
+                    votes += 1
+
+                nsfw_score = max(scores)
+
+                # 至少 2/3 票才拦截（防误判）
+                if votes >= 2:
+                    review_stats["blocked_nsfw"] += 1
+                    result["pass"] = False
+                    result["reason"] = f"NSFW 内容 (三次审核{votes}/3, score={nsfw_score:.2f})"
+                    return result
+
             except Exception:
                 pass
 
         result["scores"]["nsfw"] = round(nsfw_score, 4)
-        if nsfw_score > NSFW_THRESHOLD:
-            review_stats["blocked_nsfw"] += 1
-            result["pass"] = False
-            result["reason"] = f"NSFW 内容 (score={nsfw_score:.2f})"
-            return result
 
         # ── 2. 血腥/暴力检测（强红色区域分析） ────────────────────────
         gore_score = _detect_gore(img)
