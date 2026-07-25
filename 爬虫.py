@@ -36,6 +36,15 @@ HEADERS = {
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 }
 
+# 各图源下载时需要的 Referer（反盗链）
+SOURCE_REFERER = {
+    'Bing': 'https://cn.bing.com/',
+    '百度': 'https://image.baidu.com/',
+    'Google': 'https://www.google.com/',
+    'Pixiv': 'https://www.pixiv.net/',
+    'Safebooru': 'https://safebooru.org/',
+}
+
 ROLE_SUFFIXES = {
     "丛雨": ["立绘","壁纸","千恋万花","Murasame","ムラサメ","丛雨丸"],
     "Neuro-sama": ["vtuber","art","fanart","Neuro sama","Neurosama","AI vtuber"],
@@ -44,7 +53,8 @@ ROLE_SUFFIXES = {
     "ShikiNatsume": ["立绘","壁纸","棗シキ","Shiki Natsume","枣子姐"],
     "棍母": ["棍娘","Gun Mu","电棍母亲","电棍妈妈"],
     "otto": ["吉吉国王","电棍","otto lol","帅,otto"],
-    "Ayachi_Nene": ["立绘","壁纸","綾地寧々","Nene Ayachi","桌角战士"]
+    "Ayachi_Nene": ["立绘","壁纸","綾地寧々","Nene Ayachi","桌角战士"],
+    "米塔": ["MiSide","游戏","美女","Мила","Mita","可爱","cosplay"]
 }
 
 # ======================== 日志函数 ========================
@@ -406,10 +416,10 @@ def get_bing_images(keyword, num):
             log(f"  Bing 请求第{page+1}页: {search_url[:80]}...")
             resp = requests.get(search_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # 方式1: 从 a.iusc 的 m 属性中提取 murl
             links = soup.find_all('a', class_='iusc')
-            if not links:
-                log(f"  Bing 第{page+1}页没有找到链接")
-                break
+            found = 0
             for link in links:
                 m = link.get('m')
                 if m:
@@ -417,11 +427,29 @@ def get_bing_images(keyword, num):
                         img_url = json.loads(m).get('murl')
                         if img_url and img_url not in urls:
                             urls.append(img_url)
+                            found += 1
                             if len(urls) >= num:
                                 break
                     except:
                         continue
-            start += len(links)
+            
+            # 方式2: 备选 - 从 img 标签提取 src/data-src
+            if found == 0:
+                log(f"  Bing 尝试从 img 标签提取...")
+                for img in soup.find_all('img'):
+                    src = img.get('src') or img.get('data-src') or ''
+                    if src.startswith('http') and not src.startswith('data:'):
+                        # 过滤掉 Bing 的 UI 图标
+                        if '/images/' not in src and 'favicon' not in src.lower():
+                            if src not in urls:
+                                urls.append(src)
+                                if len(urls) >= num:
+                                    break
+            
+            if not links and not urls:
+                log(f"  Bing 第{page+1}页没有找到链接")
+                break
+            start += 20
             page += 1
             time.sleep(REQUEST_DELAY)
         except Exception as e:
@@ -535,18 +563,18 @@ def get_pixiv_images(keyword, num):
 def get_safebooru_images(keyword, num):
     log(f"Safebooru 开始搜索: {keyword}")
     urls = []
-    page = 0
+    pid = 0
     max_pages = 3
-    while len(urls) < num and page < max_pages:
-        #https://safebooru.org/index.php?page=post&s=list&tags=ace+taffy
-        api_url = f"https://safebooru.org/index.php?page={page}&s=list&tags={urllib.parse.quote(keyword)}"
+    while len(urls) < num and pid < max_pages * 20:
+        # Safebooru XML API 端点
+        api_url = f"https://safebooru.org/index.php?page=dapi&s=post&q=index&tags={urllib.parse.quote(keyword)}&pid={pid}"
         try:
-            log(f"  Safebooru请求第{page+1}页")
+            log(f"  Safebooru请求第{pid//20 + 1}页 (pid={pid})")
             resp = requests.get(api_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             soup = BeautifulSoup(resp.text, 'xml')
             posts = soup.find_all('post')
             if not posts:
-                log(f"  Safebooru第{page+1}页没有post")
+                log(f"  Safebooru第{pid//20 + 1}页没有post")
                 break
             for post in posts:
                 file_url = post.get('file_url')
@@ -554,7 +582,7 @@ def get_safebooru_images(keyword, num):
                     urls.append(file_url)
                     if len(urls) >= num:
                         break
-            page += 1
+            pid += 20
             time.sleep(REQUEST_DELAY)
         except Exception as e:
             log(f"  Safebooru出错: {e}")
@@ -575,39 +603,56 @@ if ENABLE_SAFEBOORU:
     SOURCE_GETTERS.append(('Safebooru', get_safebooru_images))
 
 def collect_urls_from_sources(keyword, target_num, suffixes):
-    all_urls = []
+    """返回 List[(url, source_name)]，每个URL带上来源名称以便下载时使用正确的 Referer"""
+    all_urls = []  # 用于去重
+    result = []    # (url, source_name) 列表
     keywords_to_try = [keyword] + [f"{keyword} {suffix}" for suffix in suffixes]
     for kw in keywords_to_try:
-        if len(all_urls) >= target_num:
+        if len(result) >= target_num:
             break
         log(f"尝试关键词: {kw}")
         for src_name, getter in SOURCE_GETTERS:
-            if len(all_urls) >= target_num:
+            if len(result) >= target_num:
                 break
-            need = target_num - len(all_urls)
-            log(f"  使用图源 {src_name} 获取最多 {need*2} 个URL...")
-            urls = getter(kw, need * 2) if need > 0 else []
-            # 过滤包含负面词的URL
+            # 每个图源每个关键词最多要 target_num 个URL，但不要太多
+            need = target_num - len(result)
+            fetch_count = min(need, 8)  # 每个来源每次最多8个URL，让多个来源都能贡献
+            log(f"  使用图源 {src_name} 获取最多 {fetch_count} 个URL...")
+            urls = getter(kw, fetch_count) if fetch_count > 0 else []
             filtered_urls = []
             for u in urls:
                 if contains_negative_word(u):
                     log(f"    负面词过滤跳过URL: {u[:80]}...")
                 elif u not in all_urls:
+                    all_urls.append(u)
                     filtered_urls.append(u)
-            new_urls = filtered_urls
-            all_urls.extend(new_urls)
-            log(f"    {src_name} 新增 {len(new_urls)} 个URL（共获得{len(urls)}，过滤掉{len(urls)-len(new_urls)}个），累计 {len(all_urls)}")
-            time.sleep(0.2)
-    return all_urls[:target_num]
+            # 带上来源名称
+            new_pairs = [(u, src_name) for u in filtered_urls]
+            result.extend(new_pairs)
+            log(f"    {src_name} 新增 {len(new_pairs)} 个URL（共获得{len(urls)}，过滤掉{len(urls)-len(new_pairs)}个），累计 {len(result)}")
+            time.sleep(0.5)
+    return result[:target_num]
 
-def download_image(url, dir_path, base_name):
+def download_image(url, dir_path, base_name, referer=None):
     # 下载前检查负面词（双重保险）
     if contains_negative_word(url):
         log(f"下载跳过（负面词）: {url[:80]}...")
         return False
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=(5, 15), stream=True)
+        dl_headers = HEADERS.copy()
+        if referer:
+            dl_headers['Referer'] = referer
+        resp = requests.get(url, headers=dl_headers, timeout=(5, 15), stream=True)
+        # ── 403 重试：用 URL 自己的域名作为 Referer ──────────────────
+        if resp.status_code == 403:
+            parsed = urllib.parse.urlparse(url)
+            fallback_referer = f"{parsed.scheme}://{parsed.netloc}/"
+            if fallback_referer != referer:
+                dl_headers['Referer'] = fallback_referer
+                time.sleep(0.3)
+                resp = requests.get(url, headers=dl_headers, timeout=(5, 15), stream=True)
         if resp.status_code != 200:
+            log(f"  下载失败 HTTP {resp.status_code}")
             return False
         content_type = resp.headers.get('content-type', '')
         ext = None
@@ -653,7 +698,14 @@ def download_image(url, dir_path, base_name):
                     f"gore={sr.get('gore',0):.2f}")
 
         return True
-    except Exception:
+    except requests.exceptions.Timeout:
+        log(f"  下载超时")
+        return False
+    except requests.exceptions.ConnectionError as e:
+        log(f"  连接失败: {e}")
+        return False
+    except Exception as e:
+        log(f"  下载异常: {e}")
         # 清理不完整文件
         if 'file_path' in locals() and os.path.exists(file_path):
             try: os.remove(file_path)
@@ -721,19 +773,20 @@ def crawl_all_roles(root_dir, max_images_per_role):
         
         suffixes = ROLE_SUFFIXES.get(role_name, ["立绘","壁纸","art","fanart","illustration"])
         print(f"  搜索关键词: {role_name}, 后缀: {suffixes}")
-        urls = collect_urls_from_sources(role_name, max_images_per_role, suffixes)
-        print(f"共获取到 {len(urls)} 个有效URL（已过滤负面词）")
+        url_pairs = collect_urls_from_sources(role_name, max_images_per_role, suffixes)  # [(url, source)]
+        print(f"共获取到 {len(url_pairs)} 个有效URL（已过滤负面词）")
         
-        if not urls:
+        if not url_pairs:
             print("  没有获取到任何URL，跳过下载")
             continue
         
         success = 0
         with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as executor:
             future_to_idx = {}
-            for idx, img_url in enumerate(urls):
+            for idx, (img_url, src_name) in enumerate(url_pairs):
                 base_name = f"{role_name}_{base_index + idx}"
-                future = executor.submit(download_image, img_url, target_dir, base_name)
+                referer = SOURCE_REFERER.get(src_name)
+                future = executor.submit(download_image, img_url, target_dir, base_name, referer)
                 future_to_idx[future] = (idx, img_url, base_name)
             
             for future in as_completed(future_to_idx):
