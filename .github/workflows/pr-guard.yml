@@ -1,0 +1,72 @@
+# PR 内容审查工作流
+# ---------------------------------------------------------------------------
+# 功能：检测 PR 中「新增内容」是否包含违禁词 / 政治类敏感词。
+#       命中则：① 在 PR 下留言说明 ② 检查标红（若配置了分支保护则阻止合并）
+#              ③ 可选：直接关闭 PR（见下方 env AUTO_CLOSE）
+#
+# 词表由你自己维护，本文件不内置任何具体词：
+#   .github/blocklist_banned.txt    普通违禁词（每行一个，# 开头为注释）
+#   .github/blocklist_political.txt 政治类敏感词（每行一个，# 开头为注释）
+# 想新增 / 调整词，直接改这两个 txt 并提交即可生效。
+#
+# 想“真正拦住合并”，还需在仓库 Settings → Branches 给 main 分支加保护规则，
+# 勾选 Require status checks to pass，并选中本工作流的 `guard` 任务。
+# ---------------------------------------------------------------------------
+
+name: PR Content Guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Scan PR diff for banned / political words
+        id: scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BANNED_FILE: .github/blocklist_banned.txt
+          POLITICAL_FILE: .github/blocklist_political.txt
+          # 改成 "true" 可在命中时直接关闭 PR；默认只留言 + 标红
+          AUTO_CLOSE: "false"
+        run: |
+          gh pr diff "$PR_NUMBER" | python .github/scripts/pr_guard.py
+
+      - name: Comment on PR (violation found)
+        if: steps.scan.outputs.violations == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body-file pr_guard_report.md
+
+      - name: Auto-close PR (optional, violation found)
+        if: steps.scan.outputs.violations == 'true' && steps.scan.outputs.auto_close == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr close "$PR_NUMBER" --comment "PR 包含违禁词 / 政治类敏感词，已自动关闭。请移除后重新提交。"
+
+      - name: Fail check to block merge
+        if: steps.scan.outputs.violations == 'true'
+        run: |
+          echo "::error::PR 命中违禁词 / 政治类敏感词审查，已拒绝合并。"
+          exit 1
