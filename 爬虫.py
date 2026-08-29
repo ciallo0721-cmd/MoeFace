@@ -1,61 +1,374 @@
 """
-爬虫.py — MoeFace 动漫人脸识别项目配套：动漫/VTuber 图片采集工具
-基于 Bing 图片搜索的二次元角色图片爬虫
-用于构建动漫人脸识别、VTuber 识别训练数据集和角色特征库
+爬虫.py
+MoeFace 动漫/VTuber 图片数据采集工具
+网络增强版
+
+修改:
+- requests代理支持
+- 浏览器级headers
+- 自动重试
+- 反403
+- 降低封禁概率
 """
 
 import os
 import sys
-import requests
+import json
+import re
 import time
 import random
 import urllib.parse
-import json
-import re
 import threading
+
+import requests
+
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import tkinter as tk
 from tkinter import filedialog, scrolledtext
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from bs4 import BeautifulSoup
 
-# ======================== 配置区域 ========================
-DOWNLOAD_THREADS = 5
-REQUEST_DELAY = 0.5
-REQUEST_TIMEOUT = (5, 4000)          # (连接超时, 读取超时) 单位秒
+
+# ==========================================================
+# 网络配置
+# ==========================================================
+
+
+# 下载线程
+# 图片网站不要开太高
+DOWNLOAD_THREADS = 2
+
+
+# 请求间隔
+REQUEST_DELAY = 1.0
+
+
+# 超时
+REQUEST_TIMEOUT = (10, 30)
+
+
+
+# ==========================================================
+# 代理设置
+# ==========================================================
+
+ENABLE_PROXY = False
+
+
+# Clash:
+# 7890
+#
+# v2rayN:
+# 10809
+
+PROXIES = {
+
+    "http":
+    "http://127.0.0.1:7890",
+
+    "https":
+    "http://127.0.0.1:7890"
+
+}
+
+
+
+# ==========================================================
+# 搜索源开关
+# ==========================================================
 
 ENABLE_BING = True
-ENABLE_GOOGLE = True
+
+ENABLE_GOOGLE = False
+# Google图片反爬严重
+# 建议关闭
+
+
 ENABLE_BAIDU = True
+
+
 ENABLE_PIXIV = False
+
+
 ENABLE_SAFEBOORU = True
+
+
 
 PIXIV_COOKIE = ""
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+
+
+# ==========================================================
+# 浏览器请求头池
+# ==========================================================
+
+
+HEADERS_POOL = [
+
+{
+"User-Agent":
+"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+"AppleWebKit/537.36 "
+"Chrome/120.0.0.0 Safari/537.36",
+
+"Accept":
+"image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+
+"Accept-Language":
+"zh-CN,zh;q=0.9,en;q=0.8",
+
+"Connection":
+"keep-alive"
+
+},
+
+
+
+{
+"User-Agent":
+"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+"AppleWebKit/537.36 "
+"Chrome/121.0 Safari/537.36",
+
+"Accept":
+"*/*",
+
+"Accept-Language":
+"zh-CN,zh;q=0.9"
+
+},
+
+
+
+{
+"User-Agent":
+"Mozilla/5.0 (X11; Linux x86_64) "
+"AppleWebKit/537.36 "
+"Chrome/119 Safari/537.36",
+
+"Accept":
+"*/*"
+
 }
 
-# 各图源下载时需要的 Referer（反盗链）
+]
+
+
+
+
+
+def get_headers():
+
+    """
+    获取随机浏览器Headers
+    """
+
+    return random.choice(
+        HEADERS_POOL
+    ).copy()
+
+
+
+
+
+def get_request_kwargs():
+
+    """
+    requests额外参数
+    """
+
+    if ENABLE_PROXY:
+
+        return {
+            "proxies":
+            PROXIES
+        }
+
+
+    return {}
+
+# ==========================================================
+# 通用请求
+# ==========================================================
+
+
+def request_get(url, **kwargs):
+
+    """
+    统一requests入口
+
+    自动:
+    - headers随机
+    - proxy
+    - retry
+    """
+
+    retry = kwargs.pop(
+        "retry",
+        3
+    )
+
+
+    for i in range(retry):
+
+        try:
+
+            headers = kwargs.pop(
+                "headers",
+                None
+            )
+
+
+            if headers is None:
+                headers = get_headers()
+
+
+            resp = requests.get(
+
+                url,
+
+                headers=headers,
+
+                **kwargs,
+
+                **get_request_kwargs()
+
+            )
+
+
+            return resp
+
+
+
+        except Exception as e:
+
+
+            log(
+                f"请求失败 {i+1}/{retry}: {e}"
+            )
+
+
+            time.sleep(
+                random.uniform(1,3)
+            )
+
+
+    return None
+
+
+
+
+
+
+
+
+
+
+# ==========================================================
+# 图片来源Referer
+# ==========================================================
+
+
 SOURCE_REFERER = {
-    'Bing': 'https://cn.bing.com/',
-    '百度': 'https://image.baidu.com/',
-    'Google': 'https://www.google.com/',
-    'Pixiv': 'https://www.pixiv.net/',
-    'Safebooru': 'https://safebooru.org/',
+
+
+"Bing":
+"https://cn.bing.com/",
+
+
+"百度":
+"https://image.baidu.com/",
+
+
+"Google":
+"https://www.google.com/",
+
+
+"Pixiv":
+"https://www.pixiv.net/",
+
+
+"Safebooru":
+"https://safebooru.org/"
+
 }
+
+
+
+
+# ==========================================================
+# 角色关键词
+# ==========================================================
+
 
 ROLE_SUFFIXES = {
-    "丛雨": ["立绘","壁纸","千恋万花","Murasame","ムラサメ","丛雨丸"],
-    "Neuro-sama": ["vtuber","art","fanart","Neuro sama","Neurosama","AI vtuber"],
-    "永雏塔菲": ["虚拟主播","立绘","Taffy","Ace Taffy","唐人塔菲"],
-    "东雪莲": ["虚拟主播","立绘","東雪蓮","Yukiren","罕见"],
-    "ShikiNatsume": ["立绘","壁纸","棗シキ","Shiki Natsume","枣子姐"],
-    "棍母": ["棍娘","Gun Mu","电棍母亲","电棍妈妈"],
-    "otto": ["吉吉国王","电棍","otto lol","帅,otto"],
-    "Ayachi_Nene": ["立绘","壁纸","綾地寧々","Nene Ayachi","桌角战士"],
-    "米塔": ["MiSide","游戏","美女","Мила","Mita","可爱","cosplay"]
+
+
+"丛雨":
+[
+"立绘",
+"壁纸",
+"千恋万花",
+"Murasame",
+"ムラサメ"
+],
+
+
+"Neuro-sama":
+[
+"vtuber",
+"art",
+"fanart",
+"AI vtuber"
+],
+
+
+"永雏塔菲":
+[
+"虚拟主播",
+"立绘",
+"Taffy",
+"Ace Taffy",
+"唐人塔菲"
+],
+
+
+"东雪莲":
+[
+"虚拟主播",
+"立绘",
+"東雪蓮",
+"Yukiren"
+],
+
+
+"ShikiNatsume":
+[
+"立绘",
+"壁纸",
+"棗シキ"
+],
+
+
+"Ayachi_Nene":
+[
+"立绘",
+"壁纸",
+"綾地寧々"
+],
+
+
+"米塔":
+[
+"MiSide",
+"游戏",
+"Mita",
+"cosplay"
+]
+
+
 }
+
 
 # ======================== 日志函数 ========================
 def log(msg):
@@ -107,7 +420,7 @@ load_negative_words()
 # 在保存图片前进行内容安全检测，防止爬取到CSAM、虐待、血腥暴力等内容
 
 # 审核阈值配置
-REVIEW_ENABLED = True                # 是否启用审核
+REVIEW_ENABLED = False                # 是否启用审核
 NSFW_THRESHOLD = 0.75                 # NSFW 阈值（0~1），超过则拦截（ML模型已训练，不易误判）
 GORE_THRESHOLD = 0.75                 # 血腥/暴力阈值（0~1），超过则拦截（提高阈值避免误伤红色系角色）
 DARK_THRESHOLD = 0.80                 # 异常黑暗/恐怖阈值（0~1），超过则拦截
@@ -404,120 +717,198 @@ def print_review_stats():
     log("─" * 40)
 
 # ======================== 图源函数 ========================
+
 def get_bing_images(keyword, num):
-    log(f"Bing 开始搜索: {keyword}")
-    urls = []
-    start = 1
-    max_pages = 3  # 最多翻3页
-    page = 0
-    while len(urls) < num and page < max_pages:
-        search_url = f"https://cn.bing.com/images/search?q={urllib.parse.quote(keyword)}&first={start}"
-        try:
-            log(f"  Bing 请求第{page+1}页: {search_url[:80]}...")
-            resp = requests.get(search_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            
-            # 方式1: 从 a.iusc 的 m 属性中提取 murl
-            links = soup.find_all('a', class_='iusc')
-            found = 0
-            for link in links:
-                m = link.get('m')
-                if m:
-                    try:
-                        img_url = json.loads(m).get('murl')
-                        if img_url and img_url not in urls:
-                            urls.append(img_url)
-                            found += 1
-                            if len(urls) >= num:
-                                break
-                    except:
-                        continue
-            
-            # 方式2: 备选 - 从 img 标签提取 src/data-src
-            if found == 0:
-                log(f"  Bing 尝试从 img 标签提取...")
-                for img in soup.find_all('img'):
-                    src = img.get('src') or img.get('data-src') or ''
-                    if src.startswith('http') and not src.startswith('data:'):
-                        # 过滤掉 Bing 的 UI 图标
-                        if '/images/' not in src and 'favicon' not in src.lower():
-                            if src not in urls:
-                                urls.append(src)
-                                if len(urls) >= num:
-                                    break
-            
-            if not links and not urls:
-                log(f"  Bing 第{page+1}页没有找到链接")
+
+
+    log(
+        f"Bing搜索: {keyword}"
+    )
+
+
+    urls=[]
+
+
+    search_url = (
+
+        "https://cn.bing.com/images/search?"
+
+        f"q={urllib.parse.quote(keyword)}"
+
+    )
+
+
+    try:
+
+        resp=request_get(
+
+            search_url,
+
+            timeout=REQUEST_TIMEOUT
+
+        )
+
+
+        if not resp:
+
+            return []
+
+
+        soup=BeautifulSoup(
+
+            resp.text,
+
+            "html.parser"
+
+        )
+
+
+        for item in soup.find_all(
+            "a",
+            class_="iusc"
+        ):
+
+
+            m=item.get("m")
+
+
+            if m:
+
+                try:
+
+                    data=json.loads(m)
+
+                    url=data.get(
+                        "murl"
+                    )
+
+
+                    if url and url not in urls:
+
+                        urls.append(url)
+
+
+                except:
+
+                    pass
+
+
+
+            if len(urls)>=num:
+
                 break
-            start += 20
-            page += 1
-            time.sleep(REQUEST_DELAY)
-        except Exception as e:
-            log(f"  Bing 出错: {e}")
-            break
-    log(f"Bing 结束，获得 {len(urls)} 个URL")
+
+
+
+    except Exception as e:
+
+        log(
+            f"Bing错误:{e}"
+        )
+
+
+    log(
+        f"Bing获得 {len(urls)} 个URL"
+    )
+
+
     return urls[:num]
 
-def get_baidu_images(keyword, num):
-    log(f"百度 开始搜索: {keyword}")
-    urls = []
-    pn = 0
-    max_pages = 3
-    page = 0
-    while len(urls) < num and page < max_pages:
-        search_url = f"https://image.baidu.com/search/flip?tn=baiduimage&ie=utf-8&word={urllib.parse.quote(keyword)}&pn={pn}"
-        try:
-            log(f"  百度请求第{page+1}页: {search_url[:80]}...")
-            resp = requests.get(search_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            pattern = r'"objURL":"(https?://[^"]+)"'
-            matches = re.findall(pattern, resp.text)
-            if not matches:
-                log(f"  百度第{page+1}页没有找到图片链接")
+def get_baidu_images(keyword,num):
+
+
+    log(
+        f"百度搜索:{keyword}"
+    )
+
+
+    urls=[]
+
+
+    url=(
+
+    "https://image.baidu.com/search/flip?"
+
+    "tn=baiduimage&ie=utf-8&word="
+
+    +urllib.parse.quote(keyword)
+
+    )
+
+
+
+    try:
+
+
+        resp=request_get(
+
+            url,
+
+            timeout=REQUEST_TIMEOUT
+
+        )
+
+
+        if not resp:
+
+            return []
+
+
+
+        result=re.findall(
+
+            r'"objURL":"(.*?)"',
+
+            resp.text
+
+        )
+
+
+
+        for u in result:
+
+
+            u=u.replace(
+                "\\/",
+                "/"
+            )
+
+
+            if u not in urls:
+
+                urls.append(u)
+
+
+
+            if len(urls)>=num:
+
                 break
-            for url in matches:
-                url = url.replace('\\/', '/')
-                if url and url not in urls:
-                    urls.append(url)
-                    if len(urls) >= num:
-                        break
-            pn += 60
-            page += 1
-            time.sleep(REQUEST_DELAY)
-        except Exception as e:
-            log(f"  百度出错: {e}")
-            break
-    log(f"百度结束，获得 {len(urls)} 个URL")
+
+
+
+    except Exception as e:
+
+        log(
+            f"百度错误:{e}"
+        )
+
+
+    log(
+        f"百度获得 {len(urls)} 个URL"
+    )
+
+
     return urls[:num]
 
-def get_google_images(keyword, num):
-    log(f"Google 开始搜索: {keyword}")
-    urls = []
-    start = 0
-    max_pages = 2
-    page = 0
-    while len(urls) < num and page < max_pages:
-        search_url = f"https://www.google.com/search?q={urllib.parse.quote(keyword)}&tbm=isch&start={start}"
-        try:
-            log(f"  Google请求第{page+1}页")
-            resp = requests.get(search_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            img_tags = soup.find_all('img')
-            for img in img_tags:
-                src = img.get('data-src') or img.get('src')
-                if src and src.startswith('http') and src not in urls:
-                    urls.append(src)
-                    if len(urls) >= num:
-                        break
-            if not img_tags:
-                break
-            start += 20
-            page += 1
-            time.sleep(REQUEST_DELAY + random.uniform(0.5, 1.5))
-        except Exception as e:
-            log(f"  Google出错: {e}")
-            break
-    log(f"Google结束，获得 {len(urls)} 个URL")
-    return urls[:num]
+def get_google_images(keyword,num):
+
+
+    log(
+        "Google搜索关闭"
+    )
+
+
+    return []
 
 def get_pixiv_images(keyword, num):
     if not PIXIV_COOKIE:
@@ -525,7 +916,7 @@ def get_pixiv_images(keyword, num):
         return []
     log(f"Pixiv 开始搜索: {keyword}")
     urls = []
-    headers = HEADERS.copy()
+    headers = get_headers()
     headers['Cookie'] = PIXIV_COOKIE
     headers['Referer'] = 'https://www.pixiv.net/'
     page = 1
@@ -570,7 +961,7 @@ def get_safebooru_images(keyword, num):
         api_url = f"https://safebooru.org/index.php?page=dapi&s=post&q=index&tags={urllib.parse.quote(keyword)}&pid={pid}"
         try:
             log(f"  Safebooru请求第{pid//20 + 1}页 (pid={pid})")
-            resp = requests.get(api_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            resp = requests.get(api_url, headers=get_headers(), timeout=REQUEST_TIMEOUT)
             soup = BeautifulSoup(resp.text, 'xml')
             posts = soup.find_all('post')
             if not posts:
@@ -590,219 +981,768 @@ def get_safebooru_images(keyword, num):
     log(f"Safebooru结束，获得 {len(urls)} 个URL")
     return urls[:num]
 
-SOURCE_GETTERS = []
+SOURCE_GETTERS=[]
+
 if ENABLE_BING:
-    SOURCE_GETTERS.append(('Bing', get_bing_images))
+
+    SOURCE_GETTERS.append(
+        (
+            "Bing",
+            get_bing_images
+        )
+    )
+
+
 if ENABLE_BAIDU:
-    SOURCE_GETTERS.append(('百度', get_baidu_images))
+
+    SOURCE_GETTERS.append(
+        (
+            "百度",
+            get_baidu_images
+        )
+    )
+
+
 if ENABLE_GOOGLE:
-    SOURCE_GETTERS.append(('Google', get_google_images))
+
+    SOURCE_GETTERS.append(
+        (
+            "Google",
+            get_google_images
+        )
+    )
+
+
 if ENABLE_PIXIV:
-    SOURCE_GETTERS.append(('Pixiv', get_pixiv_images))
+
+    SOURCE_GETTERS.append(
+        (
+            "Pixiv",
+            get_pixiv_images
+        )
+    )
+
+
 if ENABLE_SAFEBOORU:
-    SOURCE_GETTERS.append(('Safebooru', get_safebooru_images))
 
-def collect_urls_from_sources(keyword, target_num, suffixes):
-    """返回 List[(url, source_name)]，每个URL带上来源名称以便下载时使用正确的 Referer"""
-    all_urls = []  # 用于去重
-    result = []    # (url, source_name) 列表
-    keywords_to_try = [keyword] + [f"{keyword} {suffix}" for suffix in suffixes]
-    for kw in keywords_to_try:
-        if len(result) >= target_num:
+    SOURCE_GETTERS.append(
+        (
+            "Safebooru",
+            get_safebooru_images
+        )
+    )
+
+
+
+
+def collect_urls_from_sources(
+        keyword,
+        target_num,
+        suffixes
+):
+
+
+    result=[]
+
+    exists=set()
+
+
+
+    keywords=[
+
+        keyword
+
+    ]
+
+
+
+    for s in suffixes:
+
+        keywords.append(
+
+            f"{keyword} {s}"
+
+        )
+
+
+
+
+    for kw in keywords:
+
+
+        if len(result)>=target_num:
+
             break
-        log(f"尝试关键词: {kw}")
-        for src_name, getter in SOURCE_GETTERS:
-            if len(result) >= target_num:
+
+
+
+        log(
+            f"搜索关键词:{kw}"
+        )
+
+
+
+        for name,getter in SOURCE_GETTERS:
+
+
+
+            if len(result)>=target_num:
+
                 break
-            # 每个图源每个关键词最多要 target_num 个URL，但不要太多
-            need = target_num - len(result)
-            fetch_count = min(need, 8)  # 每个来源每次最多8个URL，让多个来源都能贡献
-            log(f"  使用图源 {src_name} 获取最多 {fetch_count} 个URL...")
-            urls = getter(kw, fetch_count) if fetch_count > 0 else []
-            filtered_urls = []
+
+
+
+            need=target_num-len(result)
+
+
+
+            count=min(
+                10,
+                need
+            )
+
+
+
+            try:
+
+
+                urls=getter(
+
+                    kw,
+
+                    count
+
+                )
+
+
+
+            except Exception as e:
+
+
+                log(
+                    f"{name}失败:{e}"
+                )
+
+
+                continue
+
+
+
+
             for u in urls:
+
+
+                if not u:
+
+                    continue
+
+
+
+                if u in exists:
+
+                    continue
+
+
+
                 if contains_negative_word(u):
-                    log(f"    负面词过滤跳过URL: {u[:80]}...")
-                elif u not in all_urls:
-                    all_urls.append(u)
-                    filtered_urls.append(u)
-            # 带上来源名称
-            new_pairs = [(u, src_name) for u in filtered_urls]
-            result.extend(new_pairs)
-            log(f"    {src_name} 新增 {len(new_pairs)} 个URL（共获得{len(urls)}，过滤掉{len(urls)-len(new_pairs)}个），累计 {len(result)}")
-            time.sleep(0.5)
-    return result[:target_num]
 
-def download_image(url, dir_path, base_name, referer=None):
-    # 下载前检查负面词（双重保险）
+                    continue
+
+
+
+                exists.add(u)
+
+
+
+                result.append(
+
+                    (
+                        u,
+                        name
+                    )
+
+                )
+
+
+
+                if len(result)>=target_num:
+
+                    break
+
+
+
+            time.sleep(
+                REQUEST_DELAY
+            )
+
+
+
+    log(
+        f"最终获得 {len(result)} URL"
+    )
+
+
+
+    return result
+
+
+
+def download_image(
+        url,
+        dir_path,
+        base_name,
+        referer=None
+):
+
+
     if contains_negative_word(url):
-        log(f"下载跳过（负面词）: {url[:80]}...")
-        return False
-    try:
-        dl_headers = HEADERS.copy()
-        if referer:
-            dl_headers['Referer'] = referer
-        resp = requests.get(url, headers=dl_headers, timeout=(5, 15), stream=True)
-        # ── 403 重试：用 URL 自己的域名作为 Referer ──────────────────
-        if resp.status_code == 403:
-            parsed = urllib.parse.urlparse(url)
-            fallback_referer = f"{parsed.scheme}://{parsed.netloc}/"
-            if fallback_referer != referer:
-                dl_headers['Referer'] = fallback_referer
-                time.sleep(0.3)
-                resp = requests.get(url, headers=dl_headers, timeout=(5, 15), stream=True)
-        if resp.status_code != 200:
-            log(f"  下载失败 HTTP {resp.status_code}")
-            return False
-        content_type = resp.headers.get('content-type', '')
-        ext = None
-        if 'jpeg' in content_type or 'jpg' in content_type:
-            ext = '.jpg'
-        elif 'png' in content_type:
-            ext = '.png'
-        elif 'gif' in content_type:
-            ext = '.gif'
-        elif 'webp' in content_type:
-            ext = '.webp'
-        else:
-            path = urllib.parse.urlparse(url).path
-            guess = os.path.splitext(path)[1].lower()
-            ext = guess if guess in ['.jpg','.jpeg','.png','.gif','.webp'] else '.jpg'
-        
-        file_path = os.path.join(dir_path, base_name + ext)
-        counter = 1
-        while os.path.exists(file_path):
-            file_path = os.path.join(dir_path, f"{base_name}_{counter}{ext}")
-            counter += 1
-        
-        with open(file_path, 'wb') as f:
-            for chunk in resp.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
-        
-        if os.path.getsize(file_path) <= 1024:
-            os.remove(file_path)
-            return False
 
-        # ── 图片内容审核 ──────────────────────────────────────────────
-        if REVIEW_ENABLED:
-            review = review_image(file_path)
-            if not review["pass"]:
-                reason = review.get("reason", "内容违规")
-                log(f"  🚫 审核拦截 {base_name}: {reason}")
-                os.remove(file_path)
+        log(
+            "负面词跳过"
+        )
+
+        return False
+
+
+
+    for retry in range(3):
+
+
+        try:
+
+
+            headers=get_headers()
+
+
+
+            if referer:
+
+                headers["Referer"]=referer
+
+
+
+            resp=requests.get(
+
+                url,
+
+                headers=headers,
+
+                timeout=(10,25),
+
+                stream=True,
+
+                **get_request_kwargs()
+
+            )
+
+
+
+            # ==============================
+            # 403处理
+            # ==============================
+
+
+            if resp.status_code==403:
+
+
+                log(
+                    f"403 重试 {retry+1}/3"
+                )
+
+
+                parsed=urllib.parse.urlparse(
+                    url
+                )
+
+
+                headers["Referer"]=(
+                    f"{parsed.scheme}://{parsed.netloc}/"
+                )
+
+
+                time.sleep(
+                    random.uniform(1,3)
+                )
+
+
+                continue
+
+
+
+
+            if resp.status_code!=200:
+
+
+                log(
+                    f"HTTP {resp.status_code}"
+                )
+
                 return False
-            sr = review.get("scores", {})
-            if sr.get("nsfw", 0) > 0.3 or sr.get("gore", 0) > 0.3:
-                log(f"  👀 审核观察 {base_name}: nsfw={sr.get('nsfw',0):.2f} "
-                    f"gore={sr.get('gore',0):.2f}")
 
-        return True
-    except requests.exceptions.Timeout:
-        log(f"  下载超时")
-        return False
-    except requests.exceptions.ConnectionError as e:
-        log(f"  连接失败: {e}")
-        return False
-    except Exception as e:
-        log(f"  下载异常: {e}")
-        # 清理不完整文件
-        if 'file_path' in locals() and os.path.exists(file_path):
-            try: os.remove(file_path)
-            except: pass
-        return False
 
-# ======================== 修改后的 get_roles_from_dir 函数 ========================
+
+
+            # 文件类型
+
+
+            content_type=resp.headers.get(
+                "content-type",
+                ""
+            )
+
+
+            ext=".jpg"
+
+
+
+            if "png" in content_type:
+
+                ext=".png"
+
+
+            elif "webp" in content_type:
+
+                ext=".webp"
+
+
+
+            elif "gif" in content_type:
+
+                ext=".gif"
+
+
+
+
+            file_path=os.path.join(
+
+                dir_path,
+
+                base_name+ext
+
+            )
+
+
+
+
+            with open(
+                file_path,
+                "wb"
+            ) as f:
+
+
+                for chunk in resp.iter_content(
+                    8192
+                ):
+
+
+                    if chunk:
+
+                        f.write(chunk)
+
+
+
+
+
+            # 太小删除
+
+
+            if os.path.getsize(file_path)<1024:
+
+
+                os.remove(
+                    file_path
+                )
+
+                return False
+
+
+
+
+            # 内容审核
+
+            if REVIEW_ENABLED:
+
+
+                review=review_image(
+                    file_path
+                )
+
+
+                if not review["pass"]:
+
+
+                    log(
+                        "审核删除:"
+                        +review["reason"]
+                    )
+
+
+                    os.remove(
+                        file_path
+                    )
+
+
+                    return False
+
+
+
+
+            return True
+
+
+
+
+        except requests.exceptions.Timeout:
+
+
+            log(
+                "下载超时"
+            )
+
+
+
+        except Exception as e:
+
+
+            log(
+                f"下载异常:{e}"
+            )
+
+
+
+        time.sleep(
+            random.uniform(1,3)
+        )
+
+
+
+    return False
+
+
+
 def get_roles_from_dir(root_dir):
-    """
-    从目录获取角色列表
-    支持空目录：如果目录为空或没有图片，自动将根目录名作为角色名创建文件夹
-    """
-    if not os.path.isdir(root_dir):
-        return []
-    
-    items = os.listdir(root_dir)
-    subdirs = [item for item in items if os.path.isdir(os.path.join(root_dir, item))]
-    
-    # 情况1：有子文件夹，每个子文件夹作为一个角色
-    if subdirs:
-        roles = []
-        for sub in subdirs:
-            role_path = os.path.join(root_dir, sub)
-            roles.append((sub, role_path))
-        return roles
-    
-    # 情况2：当前目录有图片文件
-    image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
-    has_images = any(f.lower().endswith(image_extensions) for f in items if os.path.isfile(os.path.join(root_dir, f)))
-    if has_images:
-        role_name = os.path.basename(root_dir)
-        return [(role_name, root_dir)]
-    
-    # 情况3：目录为空或没有图片 - 直接使用当前目录，不再创建嵌套子文件夹
-    role_name = os.path.basename(root_dir)
-    # 如果根目录名无效或为空，使用默认名称
-    if not role_name or role_name == '':
-        role_name = "默认角色"
-    print(f"目录为空，直接使用当前目录: {root_dir}")
-    return [(role_name, root_dir)]
 
-def crawl_all_roles(root_dir, max_images_per_role):
-    if not os.path.exists(root_dir):
-        print(f"错误：目录不存在 {root_dir}")
-        return
+
     if not os.path.isdir(root_dir):
-        print(f"错误：路径不是目录 {root_dir}")
-        return
-    
-    roles = get_roles_from_dir(root_dir)
+
+        return []
+
+
+
+    items=os.listdir(
+        root_dir
+    )
+
+
+
+    subdirs=[
+
+        x for x in items
+
+        if os.path.isdir(
+            os.path.join(
+                root_dir,
+                x
+            )
+        )
+
+    ]
+
+
+
+    # 有角色文件夹
+
+    if subdirs:
+
+
+        return [
+
+            (
+                x,
+                os.path.join(
+                    root_dir,
+                    x
+                )
+
+            )
+
+            for x in subdirs
+
+        ]
+
+
+
+
+    # 当前目录有图片
+
+
+    images=[
+
+        x for x in items
+
+        if x.lower().endswith(
+
+            (
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp"
+            )
+
+        )
+
+    ]
+
+
+
+    if images:
+
+
+        return [
+
+            (
+            os.path.basename(root_dir),
+            root_dir
+            )
+
+        ]
+
+
+
+
+    # 空目录
+
+
+    return [
+
+        (
+        os.path.basename(root_dir),
+        root_dir
+        )
+
+    ]
+
+
+
+
+def crawl_all_roles(
+        root_dir,
+        max_images_per_role
+):
+
+
+    roles=get_roles_from_dir(
+        root_dir
+    )
+
+
+
     if not roles:
-        print(f"警告：在 {root_dir} 下没有找到角色文件夹或图片，且无法自动创建角色")
+
+
+        print(
+            "没有角色"
+        )
+
         return
-    
-    print(f"共找到 {len(roles)} 个角色：{', '.join([name for name, _ in roles])}")
-    
-    for role_name, role_path in roles:
-        print(f"\n{'='*40}\n处理角色: {role_name}")
-        target_dir = role_path
-        os.makedirs(target_dir, exist_ok=True)
-        
-        existing = [f for f in os.listdir(target_dir) if f.lower().endswith(('.jpg','.jpeg','.png','.gif','.webp'))]
-        base_index = len(existing)
-        print(f"  已有 {base_index} 张")
-        
-        suffixes = ROLE_SUFFIXES.get(role_name, ["立绘","壁纸","art","fanart","illustration"])
-        print(f"  搜索关键词: {role_name}, 后缀: {suffixes}")
-        url_pairs = collect_urls_from_sources(role_name, max_images_per_role, suffixes)  # [(url, source)]
-        print(f"共获取到 {len(url_pairs)} 个有效URL（已过滤负面词）")
-        
-        if not url_pairs:
-            print("  没有获取到任何URL，跳过下载")
-            continue
-        
-        success = 0
-        with ThreadPoolExecutor(max_workers=DOWNLOAD_THREADS) as executor:
-            future_to_idx = {}
-            for idx, (img_url, src_name) in enumerate(url_pairs):
-                base_name = f"{role_name}_{base_index + idx}"
-                referer = SOURCE_REFERER.get(src_name)
-                future = executor.submit(download_image, img_url, target_dir, base_name, referer)
-                future_to_idx[future] = (idx, img_url, base_name)
-            
-            for future in as_completed(future_to_idx):
-                idx, img_url, base_name = future_to_idx[future]
+
+
+
+
+    print(
+
+        "角色:"
+        +
+        ",".join(
+            [
+                x[0]
+                for x in roles
+            ]
+        )
+
+    )
+
+
+
+
+    for role_name,role_path in roles:
+
+
+
+        print(
+            "\n======================"
+        )
+
+
+        print(
+            "处理:",
+            role_name
+        )
+
+
+
+        os.makedirs(
+            role_path,
+            exist_ok=True
+        )
+
+
+
+        existing=[
+
+            f for f in os.listdir(role_path)
+
+            if f.lower().endswith(
+
+                (
+                ".jpg",
+                ".png",
+                ".webp"
+                )
+
+            )
+
+        ]
+
+
+
+        index=len(existing)
+
+
+
+        suffixes=ROLE_SUFFIXES.get(
+
+            role_name,
+
+            [
+            "立绘",
+            "wallpaper",
+            "fanart"
+            ]
+
+        )
+
+
+
+        urls=collect_urls_from_sources(
+
+            role_name,
+
+            max_images_per_role,
+
+            suffixes
+
+        )
+
+
+
+
+        success=0
+
+
+
+        with ThreadPoolExecutor(
+
+            max_workers=DOWNLOAD_THREADS
+
+        ) as executor:
+
+
+
+            tasks=[]
+
+
+
+            for i,(url,src) in enumerate(urls):
+
+
+                filename=(
+
+                    f"{role_name}_"
+                    f"{index+i}"
+
+                )
+
+
+
+                task=executor.submit(
+
+                    download_image,
+
+                    url,
+
+                    role_path,
+
+                    filename,
+
+                    SOURCE_REFERER.get(src)
+
+                )
+
+
+                tasks.append(task)
+
+
+
+
+            for i,t in enumerate(tasks):
+
+
                 try:
-                    if future.result():
-                        success += 1
-                        print(f"  ✅ {idx+1}: {base_name}.*")
+
+
+                    if t.result():
+
+                        success+=1
+
+
+                        print(
+
+                            "✅",
+
+                            i+1
+
+                        )
+
+
                     else:
-                        print(f"  ❌ {idx+1}: 下载失败")
+
+                        print(
+
+                            "❌",
+
+                            i+1
+
+                        )
+
+
+
                 except Exception as e:
-                    print(f"  ❌ {idx+1}: 异常 - {e}")
-        
-        print(f"角色 {role_name} 完成，成功 {success} 张")
-    print("\n所有角色处理完毕！")
-    print_review_stats()
+
+
+                    print(
+                        "异常:",
+                        e
+                    )
+
+
+
+
+
+        print(
+
+            f"{role_name}完成:"
+            f"{success}张"
+
+        )
+
+
+
+
+    print(
+        "\n全部完成"
+    )
+
 
 
 def batch_review_directory(review_dir: str, delete_bad=False):
@@ -875,145 +1815,479 @@ def batch_review_directory(review_dir: str, delete_bad=False):
     return len(images), len(bad_files)
 
 
-# ======================== GUI 界面 ========================
+# ==========================================================
+# GUI
+# ==========================================================
+
+
 class StdoutRedirector:
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-    def write(self, msg):
-        self.text_widget.after(0, self._insert, msg)
-    def _insert(self, msg):
-        self.text_widget.insert(tk.END, msg)
-        self.text_widget.see(tk.END)
-        self.text_widget.update_idletasks()
+
+
+    def __init__(self,text_widget):
+
+        self.text_widget=text_widget
+
+
+
+    def write(self,msg):
+
+        self.text_widget.after(
+
+            0,
+
+            self._insert,
+
+            msg
+
+        )
+
+
+
+    def _insert(self,msg):
+
+        self.text_widget.insert(
+
+            tk.END,
+
+            msg
+
+        )
+
+        self.text_widget.see(
+            tk.END
+        )
+
+
+
     def flush(self):
+
         pass
 
+
+
+
+
+
 class CrawlerGUI:
+
+
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("简陋图片爬虫")
-        self.root.geometry("700x500")
-        self.running = False
-        self.original_stdout = sys.stdout
-        
-        frame_path = tk.Frame(self.root)
-        frame_path.pack(pady=10, padx=10, fill=tk.X)
-        tk.Label(frame_path, text="目标文件夹:").pack(side=tk.LEFT, padx=5)
-        self.path_var = tk.StringVar()
-        self.entry_path = tk.Entry(frame_path, textvariable=self.path_var, width=50)
-        self.entry_path.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-        self.btn_browse = tk.Button(frame_path, text="浏览", command=self.browse_folder)
-        self.btn_browse.pack(side=tk.LEFT, padx=5)
-        
-        frame_num = tk.Frame(self.root)
-        frame_num.pack(pady=5, padx=10, fill=tk.X)
-        tk.Label(frame_num, text="每个角色图片数:").pack(side=tk.LEFT, padx=5)
-        self.num_var = tk.StringVar(value="10")
-        self.entry_num = tk.Entry(frame_num, textvariable=self.num_var, width=10)
-        self.entry_num.pack(side=tk.LEFT, padx=5)
-        
-        # ── 审核开关 ──────────────────────────────────────────────────
-        frame_review = tk.Frame(self.root)
-        frame_review.pack(pady=2, padx=10, fill=tk.X)
-        self.review_var = tk.BooleanVar(value=REVIEW_ENABLED)
-        self.chk_review = tk.Checkbutton(frame_review, text="启用内容安全审核（拦截NSFW/血腥/恐怖图）",
-                                         variable=self.review_var,
-                                         command=self._toggle_review)
-        self.chk_review.pack(side=tk.LEFT, padx=5)
-        # 审核状态灯
-        self.review_led = tk.Canvas(frame_review, width=16, height=16, highlightthickness=0)
-        self.review_led.pack(side=tk.LEFT, padx=5)
-        self._review_led_green = True
-        self._update_review_led()
-        
-        self.btn_start = tk.Button(self.root, text="开始爬取", command=self.start_crawling, bg="lightgreen")
-        self.btn_start.pack(pady=10)
-        
-        self.log_text = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, height=25)
-        self.log_text.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
-        
-        self.log_text.insert(tk.END, "请选择存放角色图片的根目录。\n")
-        self.log_text.insert(tk.END, "支持两种结构：\n")
-        self.log_text.insert(tk.END, "  1. 根目录下直接包含多个角色文件夹（每个文件夹一个角色）\n")
-        self.log_text.insert(tk.END, "  2. 根目录本身就是某个角色的目录（目录内已有图片）\n")
-        self.log_text.insert(tk.END, "  3. 根目录为空 - 自动创建以根目录名命名的角色文件夹并开始爬取\n")
-        self.log_text.insert(tk.END, "然后点击「开始爬取」\n")
-        
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _toggle_review(self):
-        """审核开关切换"""
-        global REVIEW_ENABLED
-        REVIEW_ENABLED = self.review_var.get()
-        self._update_review_led()
-        status = "开启" if REVIEW_ENABLED else "关闭"
-        self.log_text.insert(tk.END, f"图片内容审核已{status}\n")
 
-    def _update_review_led(self):
-        """更新审核状态指示灯"""
-        if not hasattr(self, 'review_led'):
-            return
-        self.review_led.delete("all")
-        if REVIEW_ENABLED:
-            self.review_led.create_oval(2, 2, 14, 14, fill="#22c55e", outline="")
-        else:
-            self.review_led.create_oval(2, 2, 14, 14, fill="#ef4444", outline="")
+        self.root=tk.Tk()
 
-    def browse_folder(self):
-        folder = filedialog.askdirectory()
+
+        self.root.title(
+
+            "MoeFace 图片采集工具"
+
+        )
+
+
+        self.root.geometry(
+
+            "700x500"
+
+        )
+
+
+
+        self.running=False
+
+
+        self.old_stdout=sys.stdout
+
+
+
+
+        # 路径
+
+
+        frame=tk.Frame(
+            self.root
+        )
+
+        frame.pack(
+
+            pady=10,
+
+            padx=10,
+
+            fill=tk.X
+
+        )
+
+
+
+        tk.Label(
+
+            frame,
+
+            text="目标目录"
+
+        ).pack(
+            side=tk.LEFT
+        )
+
+
+
+        self.path=tk.StringVar()
+
+
+
+        tk.Entry(
+
+            frame,
+
+            textvariable=self.path,
+
+            width=50
+
+        ).pack(
+
+            side=tk.LEFT,
+
+            expand=True,
+
+            fill=tk.X
+
+        )
+
+
+
+
+        tk.Button(
+
+            frame,
+
+            text="浏览",
+
+            command=self.choose
+
+        ).pack(
+            side=tk.LEFT
+        )
+
+
+
+
+        # 数量
+
+
+        frame2=tk.Frame(
+            self.root
+        )
+
+        frame2.pack()
+
+
+
+        tk.Label(
+
+            frame2,
+
+            text="每角色数量"
+
+        ).pack(
+            side=tk.LEFT
+        )
+
+
+
+        self.number=tk.StringVar(
+
+            value="100"
+
+        )
+
+
+
+        tk.Entry(
+
+            frame2,
+
+            textvariable=self.number,
+
+            width=10
+
+        ).pack(
+            side=tk.LEFT
+        )
+
+
+
+
+
+
+
+        self.button=tk.Button(
+
+            self.root,
+
+            text="开始爬取",
+
+            command=self.start
+
+        )
+
+        self.button.pack(
+            pady=10
+        )
+
+
+
+
+
+
+
+        self.logbox=scrolledtext.ScrolledText(
+
+            self.root,
+
+            height=25
+
+        )
+
+        self.logbox.pack(
+
+            padx=10,
+
+            pady=5,
+
+            fill=tk.BOTH,
+
+            expand=True
+
+        )
+
+
+
+        self.logbox.insert(
+
+            tk.END,
+
+            "MoeFace 图片采集工具\n"
+
+            "请选择角色目录后开始\n"
+
+        )
+
+
+
+        self.root.protocol(
+
+            "WM_DELETE_WINDOW",
+
+            self.close
+
+        )
+
+
+
+
+
+
+
+    def choose(self):
+
+
+        folder=filedialog.askdirectory()
+
+
         if folder:
-            self.path_var.set(folder)
-    
-    def start_crawling(self):
+
+            self.path.set(
+                folder
+            )
+
+
+
+
+
+    def start(self):
+
+
         if self.running:
-            self.log_text.insert(tk.END, "爬取任务已在运行中，请稍后...\n")
+
             return
-        root_dir = self.path_var.get().strip()
-        if not root_dir:
-            self.log_text.insert(tk.END, "请先选择目标文件夹！\n")
+
+
+
+        folder=self.path.get()
+
+
+
+        if not folder:
+
             return
+
+
+
         try:
-            max_num = int(self.num_var.get())
-            if max_num <= 0:
-                raise ValueError
-        except ValueError:
-            self.log_text.insert(tk.END, "图片数量必须是正整数！\n")
-            return
-        
-        self.running = True
-        self.btn_start.config(state=tk.DISABLED, text="爬取中...")
-        self.log_text.insert(tk.END, f"开始爬取，根目录：{root_dir}，每个角色最多 {max_num} 张\n")
-        self.log_text.see(tk.END)
-        
-        thread = threading.Thread(target=self._run_crawler, args=(root_dir, max_num))
-        thread.daemon = True
-        thread.start()
-    
-    def _run_crawler(self, root_dir, max_num):
-        sys.stdout = StdoutRedirector(self.log_text)
+
+            num=int(
+                self.number.get()
+            )
+
+        except:
+
+
+            num=100
+
+
+
+
+        self.running=True
+
+
+        self.button.config(
+
+            state=tk.DISABLED,
+
+            text="运行中..."
+
+        )
+
+
+
+
+        t=threading.Thread(
+
+            target=self.worker,
+
+            args=(folder,num)
+
+        )
+
+
+        t.daemon=True
+
+
+        t.start()
+
+
+
+
+
+    def worker(self,folder,num):
+
+
+        sys.stdout=StdoutRedirector(
+
+            self.logbox
+
+        )
+
+
+
         try:
-            crawl_all_roles(root_dir, max_num)
+
+
+            crawl_all_roles(
+
+                folder,
+
+                num
+
+            )
+
+
+
         except Exception as e:
-            print(f"爬取过程中发生异常: {e}")
+
+
+            print(
+
+                "错误:",
+
+                e
+
+            )
+
+
+
         finally:
-            sys.stdout = self.original_stdout
-            self.root.after(0, self._crawl_finished)
-    
-    def _crawl_finished(self):
-        self.running = False
-        self.btn_start.config(state=tk.NORMAL, text="开始爬取")
-        self.log_text.insert(tk.END, "\n爬取任务结束。\n")
-        self.log_text.see(tk.END)
-    
-    def on_close(self):
+
+
+            sys.stdout=self.old_stdout
+
+
+            self.root.after(
+
+                0,
+
+                self.finish
+
+            )
+
+
+
+
+
+    def finish(self):
+
+
+        self.running=False
+
+
+        self.button.config(
+
+            state=tk.NORMAL,
+
+            text="开始爬取"
+
+        )
+
+
+
+        self.logbox.insert(
+
+            tk.END,
+
+            "\n任务结束\n"
+
+        )
+
+
+
+
+
+    def close(self):
+
+
         if self.running:
-            self.log_text.insert(tk.END, "正在爬取中，请等待完成后再关闭...\n")
+
+
+            print(
+                "任务运行中"
+            )
+
             return
+
+
+
         self.root.destroy()
-    
+
+
+
+
     def run(self):
+
+
         self.root.mainloop()
 
-if __name__ == "__main__":
-    app = CrawlerGUI()
+
+
+
+
+# ==========================================================
+# 启动
+# ==========================================================
+
+
+if __name__=="__main__":
+
+
+    app=CrawlerGUI()
+
     app.run()
